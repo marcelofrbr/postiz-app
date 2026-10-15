@@ -35,6 +35,9 @@ services:
       - postiz-internal
     deploy:
       replicas: 1
+      resources:
+        limits:
+          memory: 1792M
       labels:
         - traefik.enable=true
         - traefik.docker.network=marcelonet
@@ -79,23 +82,7 @@ services:
     deploy:
       replicas: 1
 
-  temporal-elasticsearch:
-    image: elasticsearch:7.17.27
-    environment:
-      discovery.type: single-node
-      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
-      xpack.security.enabled: "false"
-      cluster.routing.allocation.disk.threshold_enabled: "true"
-      cluster.routing.allocation.disk.watermark.low: 512mb
-      cluster.routing.allocation.disk.watermark.high: 256mb
-      cluster.routing.allocation.disk.watermark.flood_stage: 128mb
-    volumes:
-      - temporal-es:/usr/share/elasticsearch/data
-    networks:
-      - postiz-internal
-    deploy:
-      replicas: 1
-
+  # Sem Elasticsearch: visibilidade via SQL (Postgres), poupa ~650 MB de RAM.
   temporal:
     image: temporalio/auto-setup:1.28.1
     environment:
@@ -104,14 +91,14 @@ services:
       POSTGRES_USER: temporal
       POSTGRES_PWD: "${POSTGRES_PASSWORD}"
       POSTGRES_SEEDS: temporal-postgresql
-      ENABLE_ES: "true"
-      ES_SEEDS: temporal-elasticsearch
-      ES_VERSION: v7
       TEMPORAL_NAMESPACE: default
     networks:
       - postiz-internal
     deploy:
       replicas: 1
+      resources:
+        limits:
+          memory: 384M
 
 volumes:
   postiz-config:
@@ -119,7 +106,6 @@ volumes:
   postiz-postgres:
   postiz-redis:
   temporal-postgres:
-  temporal-es:
 
 networks:
   marcelonet:
