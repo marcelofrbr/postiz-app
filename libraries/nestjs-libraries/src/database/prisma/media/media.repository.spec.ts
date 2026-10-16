@@ -108,6 +108,7 @@ describe('MediaRepository', () => {
         where: {
           organization: { id: 'org-1' },
           deletedAt: null,
+          status: { not: 'processing' },
           OR: [{ profileId: 'prof-1' }, { profileId: null }],
         },
       });

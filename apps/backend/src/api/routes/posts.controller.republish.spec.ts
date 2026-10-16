@@ -33,7 +33,7 @@ const buildController = () => {
 };
 
 describe('PostsController.changeDate - republicacao explicita', () => {
-  it('repassa update como default seguro e preserva a posicao do profileId', () => {
+  it('repassa update como default seguro e mantem profileId na ultima posicao', () => {
     const { controller, postsService } = buildController();
 
     controller.changeDate(
@@ -50,12 +50,12 @@ describe('PostsController.changeDate - republicacao explicita', () => {
       'post-1',
       '2026-09-04T17:00:00.000Z',
       'update',
-      'profile-1',
-      false
+      false,
+      'profile-1'
     );
   });
 
-  it('repassa o opt-in depois do profileId', () => {
+  it('repassa o opt-in antes do profileId', () => {
     const { controller, postsService } = buildController();
 
     controller.changeDate(
@@ -72,8 +72,8 @@ describe('PostsController.changeDate - republicacao explicita', () => {
       'post-1',
       '2026-09-04T17:00:00.000Z',
       'schedule',
-      'profile-1',
-      true
+      true,
+      'profile-1'
     );
   });
 });

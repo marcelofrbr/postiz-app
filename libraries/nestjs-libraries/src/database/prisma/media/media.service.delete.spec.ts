@@ -1,3 +1,6 @@
+// file-type 22 e ESM; o spec nao exercita deteccao de tipo real
+jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }));
+
 // MediaService importa SubscriptionService que cascateia ate nostr-tools
 // (ESM-only que quebra ts-jest). Mockamos topo-de-modulo as cadeias pesadas.
 jest.mock(
@@ -26,7 +29,10 @@ const mockStorage = {
   healthCheck: jest.fn(),
 };
 jest.mock('@gitroom/nestjs-libraries/upload/upload.factory', () => ({
-  UploadFactory: { createStorage: () => mockStorage },
+  UploadFactory: {
+    createStorage: () => mockStorage,
+    createProcessor: () => undefined,
+  },
 }));
 
 import { MediaService } from './media.service';
@@ -44,6 +50,7 @@ const buildService = () => {
     null as any, // openaiService legacy
     null as any, // subscriptionService
     null as any, // videoManager
+    null as any, // temporalService
     null as any, // aiImageService
     null as any, // aiTextService
     null as any // aiVideoService

@@ -1,3 +1,6 @@
+// file-type 22 e ESM; o spec nao exercita deteccao de tipo real
+jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }));
+
 // MediaService importa SubscriptionService que cascateia ate nostr-tools
 // (ESM-only que quebra ts-jest). Mockamos topo-de-modulo as cadeias pesadas.
 jest.mock(
@@ -49,10 +52,14 @@ describe('MediaService.generateImage', () => {
     });
 
     const service = new MediaService(
-      null as any, // mediaRepository
-      null as any, // openaiService legacy
+      null as any,
+      // mediaRepository
+      null as any,
+      // openaiService legacy
       subscription,
-      null as any, // videoManager
+      null as any,
+      null as any, // temporalService,
+      // videoManager
       aiImage,
       aiText,
       createMock<AiVideoService>()
@@ -96,6 +103,7 @@ describe('MediaService.generateImage', () => {
       null as any,
       subscription,
       null as any,
+      null as any, // temporalService,
       aiImage,
       aiText,
       createMock<AiVideoService>()
@@ -141,6 +149,7 @@ describe('MediaService.generateImage', () => {
       null as any,
       subscription,
       null as any,
+      null as any, // temporalService,
       aiImage,
       aiText,
       createMock<AiVideoService>()
@@ -174,6 +183,7 @@ describe('MediaService.generateImage', () => {
       null as any,
       subscription,
       null as any,
+      null as any, // temporalService,
       aiImage,
       aiText,
       createMock<AiVideoService>()
@@ -181,7 +191,7 @@ describe('MediaService.generateImage', () => {
 
     await expect(
       service.generateImage('gato', buildOrg(), true)
-    ).rejects.toThrow('crash inesperado');
+    ).rejects.toThrow('AI generation failed, please try again later.');
     expect(aiImage.generate).not.toHaveBeenCalled();
   });
 
@@ -203,6 +213,7 @@ describe('MediaService.generateImage', () => {
       null as any,
       subscription,
       null as any,
+      null as any, // temporalService,
       aiImage,
       aiText,
       createMock<AiVideoService>()
@@ -236,6 +247,7 @@ describe('MediaService.generateImage', () => {
       null as any,
       subscription,
       null as any,
+      null as any, // temporalService,
       aiImage,
       aiText,
       createMock<AiVideoService>()

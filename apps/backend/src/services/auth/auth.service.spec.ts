@@ -35,8 +35,10 @@ const makeDeps = () => ({
     createOrgForUser: jest.fn().mockResolvedValue({ id: 'org-fallback' }),
     addUserToOrg: jest.fn().mockResolvedValue({ organizationId: 'org-invited' }),
   },
-  notificationService: {},
-  emailService: { sendEmail: jest.fn().mockResolvedValue(undefined) },
+  emailService: {
+    sendEmail: jest.fn().mockResolvedValue(undefined),
+    sendEmailSync: jest.fn().mockResolvedValue(undefined),
+  },
   providerManager: { getProvider: jest.fn() },
 });
 

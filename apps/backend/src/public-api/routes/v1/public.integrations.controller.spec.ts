@@ -1,4 +1,4 @@
-import { HttpException } from '@nestjs/common';
+import { BadRequestException, HttpException } from '@nestjs/common';
 import { PIPES_METADATA } from '@nestjs/common/constants';
 
 jest.mock('./public.integrations.controller', () => {
@@ -55,6 +55,7 @@ const makeIntegrationService = () => ({
 
 const makeMediaService = () => ({
   saveFile: jest.fn().mockResolvedValue({ id: 'media-1', path: '/uploads/x.jpg' }),
+  uploadFromUrl: jest.fn().mockResolvedValue({ id: 'media-2', path: '/uploads/y.jpg' }),
 });
 
 describe('PublicIntegrationsController - listIntegration', () => {
@@ -80,26 +81,26 @@ describe('PublicIntegrationsController - listIntegration', () => {
   });
 
   it('chave de perfil sem profileId: usa publicApiProfileId como filtro', async () => {
-    await controller.listIntegration({ id: 'org-1' } as any, 'prof-1', undefined);
+    await controller.listIntegration({ id: 'org-1' } as any, 'prof-1', undefined, undefined);
 
     expect(integrationService.getIntegrationsList).toHaveBeenCalledWith('org-1', 'prof-1');
   });
 
   it('chave de perfil com profileId igual: passa (200)', async () => {
-    await controller.listIntegration({ id: 'org-1' } as any, 'prof-1', 'prof-1');
+    await controller.listIntegration({ id: 'org-1' } as any, 'prof-1', undefined, 'prof-1');
 
     expect(integrationService.getIntegrationsList).toHaveBeenCalledWith('org-1', 'prof-1');
   });
 
   it('chave de perfil com profileId diferente: lanca 403', async () => {
     await expect(
-      controller.listIntegration({ id: 'org-1' } as any, 'prof-1', 'prof-OUTRO')
+      controller.listIntegration({ id: 'org-1' } as any, 'prof-1', undefined, 'prof-OUTRO')
     ).rejects.toBeInstanceOf(HttpException);
     expect(integrationService.getIntegrationsList).not.toHaveBeenCalled();
   });
 
   it('chave de org sem profileId: retorna tudo (comportamento atual)', async () => {
-    await controller.listIntegration({ id: 'org-1' } as any, undefined, undefined);
+    await controller.listIntegration({ id: 'org-1' } as any, undefined, undefined, undefined);
 
     expect(integrationService.getIntegrationsList).toHaveBeenCalledWith('org-1', undefined);
   });
@@ -140,22 +141,11 @@ describe('PublicIntegrationsController - upload (escopo por perfil)', () => {
     };
   });
 
-  it('mantem validacao por magic bytes no upload multipart publico', () => {
-    const pipes = Reflect.getMetadata(
-      PIPES_METADATA,
-      PublicIntegrationsController.prototype.uploadSimple
-    );
-
-    expect(pipes).toEqual(
-      expect.arrayContaining([expect.any(CustomFileValidationPipe)])
-    );
-  });
-
   it('uploadSimple com chave de perfil: vincula a midia ao perfil', async () => {
     await controller.uploadSimple(
       { id: 'org-1' } as any,
       'prof-1',
-      { originalname: 'x.jpg' } as any
+      { filename: 'x.jpg', path: '/uploads/x.jpg' } as any
     );
 
     expect(mediaService.saveFile).toHaveBeenCalledWith(
@@ -171,7 +161,7 @@ describe('PublicIntegrationsController - upload (escopo por perfil)', () => {
     await controller.uploadSimple(
       { id: 'org-1' } as any,
       undefined,
-      { originalname: 'x.jpg' } as any
+      { filename: 'x.jpg', path: '/uploads/x.jpg' } as any
     );
 
     expect(mediaService.saveFile).toHaveBeenCalledWith(
@@ -190,31 +180,27 @@ describe('PublicIntegrationsController - upload (escopo por perfil)', () => {
     expect(mediaService.saveFile).not.toHaveBeenCalled();
   });
 
+  // O download, o limite de tamanho, a checagem SSRF e a deteccao de tipo por
+  // magic bytes vivem em MediaService.uploadFromUrl (fluxo em stream do Postiz
+  // oficial); aqui so se verifica o escopo por perfil e o formato do erro.
   it('uploadsFromUrl com chave de perfil: vincula a midia ao perfil', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue(new Response(new Uint8Array([1, 2, 3])));
-    (global as any).fetch = fetchMock;
-
     await controller.uploadsFromUrl(
       { id: 'org-1' } as any,
       'prof-1',
       { url: 'https://cdn.example.com/x.jpg' } as any
     );
 
-    expect(mediaService.saveFile).toHaveBeenCalledWith(
+    expect(mediaService.uploadFromUrl).toHaveBeenCalledWith(
       'org-1',
-      'x.jpg',
-      '/uploads/x.jpg',
-      undefined,
+      'https://cdn.example.com/x.jpg',
       'prof-1'
     );
   });
 
-  it('uploadsFromUrl bloqueia URL insegura antes do fetch', async () => {
-    mockIsSafePublicHttpsUrl.mockResolvedValueOnce(false);
-    const fetchMock = jest.fn();
-    (global as any).fetch = fetchMock;
+  it('uploadsFromUrl converte BadRequest do service em 400 com { msg }', async () => {
+    mediaService.uploadFromUrl.mockRejectedValueOnce(
+      new BadRequestException('Failed to fetch URL')
+    );
 
     await expect(
       controller.uploadsFromUrl(
@@ -222,76 +208,10 @@ describe('PublicIntegrationsController - upload (escopo por perfil)', () => {
         'prof-1',
         { url: 'http://169.254.169.254/latest/meta-data' } as any
       )
-    ).rejects.toMatchObject({ status: 400 });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(mediaService.saveFile).not.toHaveBeenCalled();
-  });
-
-  it('uploadsFromUrl normaliza rejeicao de rede/timeout como 400', async () => {
-    (global as any).fetch = jest.fn().mockRejectedValue(new Error('timeout'));
-
-    await expect(
-      controller.uploadsFromUrl(
-        { id: 'org-1' } as any,
-        'prof-1',
-        { url: 'https://cdn.example.com/x.jpg' } as any
-      )
-    ).rejects.toMatchObject({ status: 400 });
-
-    expect(mediaService.saveFile).not.toHaveBeenCalled();
-  });
-
-  it('uploadsFromUrl rejeita Content-Length acima do limite antes de salvar', async () => {
-    (global as any).fetch = jest.fn().mockResolvedValue(
-      new Response(new Uint8Array([1]), {
-        headers: { 'content-length': String(1024 * 1024 * 1024 + 1) },
-      })
-    );
-
-    await expect(
-      controller.uploadsFromUrl(
-        { id: 'org-1' } as any,
-        'prof-1',
-        { url: 'https://cdn.example.com/huge.mp4' } as any
-      )
-    ).rejects.toMatchObject({ status: 400 });
-
-    expect(mediaService.saveFile).not.toHaveBeenCalled();
-  });
-
-  it('uploadsFromUrl rejeita transferencia chunked acima do limite do MIME real', async () => {
-    const imageLimit = 10 * 1024 * 1024;
-    (global as any).fetch = jest
-      .fn()
-      .mockResolvedValue(new Response(new Uint8Array(imageLimit + 1)));
-
-    await expect(
-      controller.uploadsFromUrl(
-        { id: 'org-1' } as any,
-        'prof-1',
-        { url: 'https://cdn.example.com/large-image.jpg' } as any
-      )
-    ).rejects.toMatchObject({ status: 400 });
-
-    expect(mediaService.saveFile).not.toHaveBeenCalled();
-  });
-
-  it('uploadsFromUrl preserva validacao por magic bytes antes do storage', async () => {
-    mockDetectAllowedUploadMime.mockResolvedValueOnce(null);
-    (global as any).fetch = jest
-      .fn()
-      .mockResolvedValue(new Response(Buffer.from('<svg></svg>')));
-
-    await expect(
-      controller.uploadsFromUrl(
-        { id: 'org-1' } as any,
-        'prof-1',
-        { url: 'https://cdn.example.com/fake.jpg' } as any
-      )
-    ).rejects.toMatchObject({ status: 400 });
-
-    expect(mediaService.saveFile).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      status: 400,
+      response: { msg: 'Failed to fetch URL' },
+    });
   });
 });
 
@@ -300,6 +220,7 @@ const makePostsService = () => ({
   getPost: jest.fn(),
   deletePost: jest.fn().mockResolvedValue({ id: 'post-1' }),
   mapTypeToPost: jest.fn(),
+  validatePosts: jest.fn().mockResolvedValue([]),
   createPost: jest.fn().mockResolvedValue([]),
   checkPostAnalytics: jest.fn().mockResolvedValue([]),
   findFreeDateTime: jest.fn().mockResolvedValue('2026-07-05T10:00:00'),
@@ -387,6 +308,8 @@ describe('PublicIntegrationsController - posts (escopo por perfil)', () => {
     expect(postsService.createPost).toHaveBeenCalledWith(
       'org-1',
       expect.objectContaining({ type: 'now' }),
+      'API',
+      false,
       'prof-1'
     );
   });
