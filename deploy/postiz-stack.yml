@@ -27,6 +27,8 @@ services:
       NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
       NX_ADD_PLUGINS: "false"
       API_LIMIT: "30"
+      FACEBOOK_APP_ID: "${FACEBOOK_APP_ID}"
+      FACEBOOK_APP_SECRET: "${FACEBOOK_APP_SECRET}"
     volumes:
       - postiz-config:/config/
       - postiz-uploads:/uploads/
