@@ -1,0 +1,422 @@
+import {
+  PrismaRepository,
+  PrismaTransaction,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { Injectable } from '@nestjs/common';
+import { Profile, ProfileRole, ShortLinkPreference } from '@prisma/client';
+import { AuthService } from '@gitroom/helpers/auth/auth.service';
+import { makeSecureId } from '@gitroom/nestjs-libraries/services/make.secure.id';
+
+export interface ProfilePersonaData {
+  brandDescription?: string | null;
+  toneOfVoice?: string | null;
+  writingInstructions?: string | null;
+  preferredCtas?: string[];
+  contentRestrictions?: string | null;
+  imageStyle?: string | null;
+  targetAudience?: string | null;
+  examplePosts?: string[];
+}
+
+export interface ProfileDeletionResult {
+  profile: Profile;
+  workflowIds: string[];
+}
+
+@Injectable()
+export class ProfileRepository {
+  constructor(
+    private _profile: PrismaRepository<'profile'>,
+    private _profileMember: PrismaRepository<'profileMember'>,
+    private _profilePersona: PrismaRepository<'profilePersona'>,
+    private _userOrganization: PrismaRepository<'userOrganization'>,
+    private _tx: PrismaTransaction
+  ) {}
+
+  getProfilesByOrgId(orgId: string) {
+    return this._profile.model.profile.findMany({
+      where: { organizationId: orgId, deletedAt: null },
+      include: {
+        members: {
+          select: {
+            userId: true,
+            role: true,
+          },
+        },
+        _count: {
+          select: {
+            integrations: { where: { deletedAt: null } },
+          },
+        },
+      },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+  }
+
+  // Resolve nome de perfil por id (escopado à org). NÃO filtra deletedAt de
+  // propósito: usado pelo log de Status > Histórico, onde um evento de um perfil
+  // soft-deletado ainda precisa mostrar o nome de origem (o req é "identificar de
+  // qual perfil veio"). Busca só os ids da página (sem N+1 nem varrer a org toda).
+  getProfileNamesByIds(orgId: string, ids: string[]) {
+    return this._profile.model.profile.findMany({
+      where: { organizationId: orgId, id: { in: ids } },
+      select: { id: true, name: true },
+    });
+  }
+
+  getProfileById(orgId: string, profileId: string) {
+    return this._profile.model.profile.findFirst({
+      where: { id: profileId, organizationId: orgId, deletedAt: null },
+      include: {
+        members: {
+          select: {
+            id: true,
+            userId: true,
+            role: true,
+          },
+        },
+      },
+    });
+  }
+
+  getDefaultProfile(orgId: string) {
+    return this._profile.model.profile.findFirst({
+      where: { organizationId: orgId, isDefault: true, deletedAt: null },
+    });
+  }
+
+  createProfile(
+    orgId: string,
+    data: { name: string; slug: string; description?: string; avatarUrl?: string }
+  ) {
+    return this._profile.model.profile.create({
+      data: {
+        organizationId: orgId,
+        name: data.name,
+        slug: data.slug,
+        description: data.description,
+        avatarUrl: data.avatarUrl,
+      },
+    });
+  }
+
+  updateProfile(
+    orgId: string,
+    profileId: string,
+    data: { name?: string; slug?: string; description?: string; avatarUrl?: string }
+  ) {
+    return this._profile.model.profile.update({
+      where: { id: profileId, organizationId: orgId },
+      data,
+    });
+  }
+
+  deleteProfile(orgId: string, profileId: string): Promise<ProfileDeletionResult> {
+    return this._tx.model.$transaction(async (tx) => {
+      const deletedAt = new Date();
+      const scope: {
+        organizationId: string;
+        profileId: string;
+        deletedAt: null;
+      } = {
+        organizationId: orgId,
+        profileId,
+        deletedAt: null,
+      };
+
+      // Capture workflow identifiers before archiving the rows. The service
+      // terminates them after the transaction commits, preventing already
+      // sleeping jobs from publishing for a cancelled client.
+      const [queuedPosts, autoPosts, repostRules, flowExecutions] =
+        await Promise.all([
+          tx.post.findMany({
+            where: {
+              ...scope,
+              parentPostId: null,
+              state: 'QUEUE',
+            },
+            select: { id: true },
+          }),
+          tx.autoPost.findMany({
+            where: scope,
+            select: { id: true },
+          }),
+          tx.repostRule.findMany({
+            where: scope,
+            select: { id: true },
+          }),
+          tx.flowExecution.findMany({
+            where: {
+              flow: { organizationId: orgId, profileId },
+              status: { in: ['RUNNING', 'WAITING_POSTBACK'] },
+              temporalWorkflowId: { not: null },
+            },
+            select: { temporalWorkflowId: true },
+          }),
+        ]);
+
+      await Promise.all([
+        // Published and failed posts remain available as history. Only content
+        // that could still be published is archived.
+        tx.post.updateMany({
+          where: {
+            ...scope,
+            state: { in: ['QUEUE', 'DRAFT'] },
+          },
+          data: { deletedAt },
+        }),
+        tx.integration.updateMany({
+          where: scope,
+          data: { disabled: true, deletedAt },
+        }),
+        tx.flow.updateMany({
+          where: scope,
+          data: { status: 'ARCHIVED', deletedAt },
+        }),
+        tx.autoPost.updateMany({
+          where: scope,
+          data: { active: false, deletedAt },
+        }),
+        tx.repostRule.updateMany({
+          where: scope,
+          data: { enabled: false, deletedAt },
+        }),
+        tx.webhooks.updateMany({
+          where: scope,
+          data: { deletedAt },
+        }),
+        tx.flowExecution.updateMany({
+          where: {
+            flow: { organizationId: orgId, profileId },
+            status: { in: ['RUNNING', 'WAITING_POSTBACK'] },
+          },
+          data: { status: 'CANCELLED', completedAt: deletedAt },
+        }),
+        tx.pendingPostback.updateMany({
+          where: {
+            flow: { organizationId: orgId, profileId },
+            status: 'PENDING',
+          },
+          data: { status: 'ABANDONED' },
+        }),
+      ]);
+
+      const profile = await tx.profile.update({
+        where: { id: profileId, organizationId: orgId, deletedAt: null },
+        data: { deletedAt },
+      });
+
+      return {
+        profile,
+        workflowIds: [
+          ...queuedPosts.map((post) => `post_${post.id}`),
+          ...autoPosts.map((autoPost) => `autopost-${autoPost.id}`),
+          ...repostRules.map((rule) => `repost-rule-${rule.id}`),
+          ...flowExecutions.flatMap((execution) =>
+            execution.temporalWorkflowId ? [execution.temporalWorkflowId] : []
+          ),
+        ],
+      };
+    });
+  }
+
+  addMember(profileId: string, userId: string, role: ProfileRole) {
+    return this._profileMember.model.profileMember.upsert({
+      where: {
+        profileId_userId: { profileId, userId },
+      },
+      create: { profileId, userId, role },
+      update: { role },
+    });
+  }
+
+  removeMember(profileId: string, userId: string) {
+    return this._profileMember.model.profileMember.delete({
+      where: {
+        profileId_userId: { profileId, userId },
+      },
+    });
+  }
+
+  getMemberRole(profileId: string, userId: string) {
+    return this._profileMember.model.profileMember.findUnique({
+      where: {
+        profileId_userId: { profileId, userId },
+      },
+      select: { role: true },
+    });
+  }
+
+  getUserProfileIds(userId: string, orgId: string) {
+    return this._profileMember.model.profileMember.findMany({
+      where: {
+        userId,
+        profile: {
+          organizationId: orgId,
+          deletedAt: null,
+        },
+      },
+      select: { profileId: true, role: true },
+    });
+  }
+
+  isUserInOrg(userId: string, orgId: string) {
+    return this._userOrganization.model.userOrganization.findFirst({
+      where: { userId, organizationId: orgId, disabled: false },
+      select: { id: true },
+    });
+  }
+
+  getMembers(profileId: string) {
+    return this._profileMember.model.profileMember.findMany({
+      where: { profileId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+          },
+        },
+      },
+    });
+  }
+
+  getZernioApiKey(profileId: string) {
+    return this._profile.model.profile.findUnique({
+      where: { id: profileId },
+      select: { zernioApiKey: true },
+    });
+  }
+
+  saveZernioApiKey(profileId: string, encryptedKey: string) {
+    return this._profile.model.profile.update({
+      where: { id: profileId },
+      data: { zernioApiKey: encryptedKey },
+    });
+  }
+
+  removeZernioApiKey(profileId: string) {
+    return this._profile.model.profile.update({
+      where: { id: profileId },
+      data: { zernioApiKey: null },
+    });
+  }
+
+  getShortlinkPreference(profileId: string) {
+    return this._profile.model.profile.findUnique({
+      where: { id: profileId },
+      select: { shortlink: true },
+    });
+  }
+
+  updateShortlinkPreference(profileId: string, shortlink: ShortLinkPreference) {
+    return this._profile.model.profile.update({
+      where: { id: profileId },
+      data: { shortlink },
+    });
+  }
+
+  getAiCredits(orgId: string, profileId: string) {
+    return this._profile.model.profile.findFirst({
+      where: { id: profileId, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        isDefault: true,
+        aiImageCredits: true,
+        aiVideoCredits: true,
+      },
+    });
+  }
+
+  updateAiCredits(
+    orgId: string,
+    profileId: string,
+    data: { aiImageCredits?: number | null; aiVideoCredits?: number | null }
+  ) {
+    return this._profile.model.profile.update({
+      where: { id: profileId, organizationId: orgId },
+      data,
+    });
+  }
+
+  getPersona(profileId: string) {
+    return this._profilePersona.model.profilePersona.findUnique({
+      where: { profileId },
+    });
+  }
+
+  upsertPersona(profileId: string, data: ProfilePersonaData) {
+    const cleanArrays = {
+      preferredCtas: (data.preferredCtas || [])
+        .map((s) => (typeof s === 'string' ? s.trim() : ''))
+        .filter(Boolean),
+      examplePosts: (data.examplePosts || [])
+        .map((s) => (typeof s === 'string' ? s.trim() : ''))
+        .filter(Boolean)
+        .slice(0, 5),
+    };
+    const payload = {
+      brandDescription: data.brandDescription ?? null,
+      toneOfVoice: data.toneOfVoice ?? null,
+      writingInstructions: data.writingInstructions ?? null,
+      contentRestrictions: data.contentRestrictions ?? null,
+      imageStyle: data.imageStyle ?? null,
+      targetAudience: data.targetAudience ?? null,
+      ...cleanArrays,
+    };
+    return this._profilePersona.model.profilePersona.upsert({
+      where: { profileId },
+      create: { profileId, ...payload },
+      update: payload,
+    });
+  }
+
+  deletePersona(profileId: string) {
+    return this._profilePersona.model.profilePersona.deleteMany({
+      where: { profileId },
+    });
+  }
+
+  getProfileByApiKey(apiKey: string) {
+    return this._profile.model.profile.findFirst({
+      where: { apiKey, deletedAt: null },
+      include: {
+        organization: {
+          include: {
+            subscription: {
+              select: {
+                subscriptionTier: true,
+                totalChannels: true,
+                isLifetime: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  updateApiKey(orgId: string, profileId: string) {
+    return this._profile.model.profile.update({
+      where: { id: profileId, organizationId: orgId },
+      data: { apiKey: AuthService.fixedEncryption(makeSecureId(20)) },
+      select: { id: true, apiKey: true },
+    });
+  }
+
+  getAllProfilesWithCredits(orgId: string) {
+    return this._profile.model.profile.findMany({
+      where: { organizationId: orgId, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        isDefault: true,
+        aiImageCredits: true,
+        aiVideoCredits: true,
+      },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+  }
+}

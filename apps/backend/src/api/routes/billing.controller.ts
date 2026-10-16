@@ -25,8 +25,10 @@ import {
   AuthorizationActions,
   Sections,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import { SkipProfileAccess } from '@gitroom/nestjs-libraries/services/auth/profile-access/profile-access.decorators';
 
 @ApiTags('Billing')
+@SkipProfileAccess()
 @Controller('/billing')
 export class BillingController {
   constructor(

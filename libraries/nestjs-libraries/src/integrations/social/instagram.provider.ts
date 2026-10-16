@@ -2,6 +2,7 @@ import {
   AnalyticsData,
   AuthTokenDetails,
   PendingCheckResponse,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -12,15 +13,54 @@ import dayjs from 'dayjs';
 import {
   BadBody,
   Disconnect,
+  RefreshToken,
   SocialAbstract,
   ValidityMedia,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { InstagramDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/instagram.dto';
 import { Integration } from '@prisma/client';
+import {
+  META_FACEBOOK_GRAPH_URL,
+  META_FACEBOOK_OAUTH_URL,
+  metaGraphUrl,
+} from '@gitroom/nestjs-libraries/integrations/social/meta-graph.constants';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
-import { META_GRAPH_API_VERSION } from '@gitroom/nestjs-libraries/integrations/social/facebook.provider';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
+import { InstagramDmButton } from '@gitroom/nestjs-libraries/integrations/social/instagram-dm-button.type';
+
+// Aborta a chamada Graph API se passar de `timeoutMs` ms. Evita que uma
+// chamada lenta a graph.facebook.com (comum em agencias com muitas pages
+// via Business Manager) trave o OAuth callback inteiro e cause 504 do Nginx.
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs = 15000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Traduz o botao interno para o formato de botao da Meta Messenger API.
+// Meta limita o title do botao a 20 chars; trimming garante envio valido.
+function buildButton(button: InstagramDmButton) {
+  if (button.kind === 'postback') {
+    return {
+      type: 'postback',
+      title: button.title.slice(0, 20),
+      payload: button.payload,
+    };
+  }
+  return {
+    type: 'web_url',
+    url: button.url,
+    title: button.title.slice(0, 20),
+  };
+}
 
 @Rules(
   "Instagram should have at least one attachment, if it's a story, it can have only one picture"
@@ -32,6 +72,9 @@ export class InstagramProvider
   identifier = 'instagram';
   name = 'Instagram\n(Facebook Business)';
   isBetweenSteps = true;
+  // refreshToken() abaixo e stub: Page Access Token nao se renova por
+  // refresh_token. Ver noNativeRefresh na interface.
+  noNativeRefresh = true;
   toolTip = 'Instagram must be business and connected to a Facebook page';
   scopes = [
     'instagram_basic',
@@ -41,6 +84,7 @@ export class InstagramProvider
     'instagram_content_publish',
     'instagram_manage_comments',
     'instagram_manage_insights',
+    'instagram_manage_messages',
   ];
   override maxConcurrentJob = 400;
   editor = 'normal' as const;
@@ -353,6 +397,19 @@ export class InstagramProvider
       };
     }
 
+    const isInvalidMetaUserSession =
+      /(?:"code"\s*:\s*190|\b190\b)/.test(body) &&
+      /(?:"error_subcode"\s*:\s*(?:460|464)|\b190\s*\/\s*(?:460|464)\b)/.test(
+        body
+      );
+    if (isInvalidMetaUserSession) {
+      return {
+        type: 'refresh-token' as const,
+        value:
+          'The connected Facebook user session is no longer valid, please reconnect the account',
+      };
+    }
+
     if (body.indexOf('190,') > -1) {
       return {
         type: 'bad-body' as const,
@@ -470,12 +527,13 @@ export class InstagramProvider
     };
   }
 
-  async generateAuthUrl() {
+  async generateAuthUrl(clientInformation?: ClientInformation) {
+    const clientId = clientInformation?.client_id || process.env.FACEBOOK_APP_ID;
     const state = makeSecureId(6);
     return {
       url:
-        `https://www.facebook.com/${META_GRAPH_API_VERSION}/dialog/oauth` +
-        `?client_id=${process.env.FACEBOOK_APP_ID}` +
+        `${META_FACEBOOK_OAUTH_URL}/dialog/oauth` +
+        `?client_id=${clientId}` +
         `&redirect_uri=${encodeURIComponent(
           `${process.env.FRONTEND_URL}/integrations/social/instagram`
         )}` +
@@ -490,36 +548,76 @@ export class InstagramProvider
     code: string;
     codeVerifier: string;
     refresh: string;
-  }) {
+  }, clientInformation?: ClientInformation) {
+    const clientId = clientInformation?.client_id || process.env.FACEBOOK_APP_ID;
+    const clientSecret = clientInformation?.client_secret || process.env.FACEBOOK_APP_SECRET;
+
+    // Log de quais credenciais estao sendo usadas (sem expor secret).
+    // Ajuda a diagnosticar falhas de token-exchange por client_id divergente
+    // entre Settings > Credentials (DB) e o App registrado no Meta.
+    console.log('[Instagram.authenticate] credentials source:', {
+      hasClientInfo: !!clientInformation,
+      clientIdPrefix: String(clientId || '').slice(0, 6) + '...',
+      hasSecret: !!clientSecret,
+      redirectUri: `${process.env.FRONTEND_URL}/integrations/social/instagram${
+        params.refresh ? `?refresh=${params.refresh}` : ''
+      }`,
+    });
+
     const getAccessToken = await (
-      await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/oauth/access_token` +
-          `?client_id=${process.env.FACEBOOK_APP_ID}` +
+      await fetchWithTimeout(
+        `${META_FACEBOOK_GRAPH_URL}/oauth/access_token` +
+          `?client_id=${clientId}` +
           `&redirect_uri=${encodeURIComponent(
             `${process.env.FRONTEND_URL}/integrations/social/instagram${
               params.refresh ? `?refresh=${params.refresh}` : ''
             }`
           )}` +
-          `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
+          `&client_secret=${clientSecret}` +
           `&code=${params.code}`
       )
     ).json();
 
-    const { access_token, expires_in, ...all } = await (
-      await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/oauth/access_token` +
+    // Loga a resposta crua do token-exchange. Se vier {error: {...}}, conseguimos
+    // ver o motivo exato (rate limit, code expirado, redirect_uri mismatch).
+    if (!getAccessToken.access_token) {
+      console.error('[Instagram.authenticate] token exchange retornou erro:', getAccessToken);
+      throw new Error(
+        `Meta token exchange failed: ${JSON.stringify(getAccessToken.error || getAccessToken)}`
+      );
+    }
+
+    const longLivedResponse = await (
+      await fetchWithTimeout(
+        `${META_FACEBOOK_GRAPH_URL}/oauth/access_token` +
           '?grant_type=fb_exchange_token' +
-          `&client_id=${process.env.FACEBOOK_APP_ID}` +
-          `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
+          `&client_id=${clientId}` +
+          `&client_secret=${clientSecret}` +
           `&fb_exchange_token=${getAccessToken.access_token}`
       )
     ).json();
 
-    const { data } = await (
-      await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/me/permissions?access_token=${access_token}`
+    if (!longLivedResponse.access_token) {
+      console.error('[Instagram.authenticate] long-lived token exchange retornou erro:', longLivedResponse);
+      throw new Error(
+        `Meta long-lived token exchange failed: ${JSON.stringify(longLivedResponse.error || longLivedResponse)}`
+      );
+    }
+    const { access_token, expires_in, ...all } = longLivedResponse;
+
+    const permsResponse = await (
+      await fetchWithTimeout(
+        `${META_FACEBOOK_GRAPH_URL}/me/permissions?access_token=${access_token}`
       )
     ).json();
+
+    if (!permsResponse.data) {
+      console.error('[Instagram.authenticate] /me/permissions retornou erro:', permsResponse);
+      throw new Error(
+        `Meta /me/permissions failed: ${JSON.stringify(permsResponse.error || permsResponse)}`
+      );
+    }
+    const { data } = permsResponse;
 
     const permissions = data
       .filter((d: any) => d.status === 'granted')
@@ -527,8 +625,8 @@ export class InstagramProvider
     this.checkScopes(this.scopes, permissions);
 
     const { id, name, picture } = await (
-      await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/me?fields=id,name,picture&access_token=${access_token}`
+      await fetchWithTimeout(
+        `${META_FACEBOOK_GRAPH_URL}/me?fields=id,name,picture&access_token=${access_token}`
       )
     ).json();
 
@@ -548,10 +646,17 @@ export class InstagramProvider
     const seenPageIds = new Set<string>();
     const allFacebookPages: any[] = [];
 
+    // Orcamento total de 90s para o pages() inteiro. Se ultrapassar, retornamos
+    // os resultados parciais ja coletados — evita 504 do Nginx em agencias com
+    // muitas pages via Business Manager.
+    const overallDeadline = Date.now() + 90000;
+    const budgetExceeded = () => Date.now() > overallDeadline;
+
     const fetchPaginated = async (startUrl: string) => {
       let nextUrl: string | undefined = startUrl;
       while (nextUrl) {
-        const response = await (await fetch(nextUrl)).json();
+        if (budgetExceeded()) return;
+        const response = await (await fetchWithTimeout(nextUrl)).json();
         if (response.data) {
           for (const page of response.data) {
             if (!seenPageIds.has(page.id)) {
@@ -565,66 +670,90 @@ export class InstagramProvider
     };
 
     // Fetch pages the user explicitly shared during the OAuth dialog
-    await fetchPaginated(
-      `https://graph.facebook.com/${META_GRAPH_API_VERSION}/me/accounts?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
-    );
-
-    // Also fetch pages via Business Manager API to discover pages
-    // not selected during the OAuth page selection step
     try {
-      let bizUrl:
-        | string
-        | undefined = `https://graph.facebook.com/${META_GRAPH_API_VERSION}/me/businesses?access_token=${accessToken}`;
+      await fetchPaginated(
+        `${META_FACEBOOK_GRAPH_URL}/me/accounts?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
+      );
+    } catch (err) {
+      console.warn('[Instagram.pages] /me/accounts failed:', (err as Error)?.message);
+    }
 
-      while (bizUrl) {
-        const bizResponse = await (await fetch(bizUrl)).json();
-        if (bizResponse.data) {
-          for (const business of bizResponse.data) {
-            try {
-              await fetchPaginated(
-                `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${business.id}/owned_pages?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
-              );
-            } catch {
-              // Continue with other businesses
-            }
+    // Also fetch pages via Business Manager API to discover pages not selected
+    // during the OAuth page selection step. Atencao: o custo escala com o
+    // numero de BMs selecionados no Meta App — apps com muitos BMs podem
+    // estourar o rate limit (#4 "Application request limit reached"). Controle
+    // no painel do Meta App selecionando apenas os BMs necessarios. O budget
+    // de 90s + timeouts individuais garantem que nunca pendura indefinido.
+    if (!budgetExceeded()) {
+      try {
+        let bizUrl: string | undefined =
+          `${META_FACEBOOK_GRAPH_URL}/me/businesses?access_token=${accessToken}`;
 
-            try {
-              await fetchPaginated(
-                `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${business.id}/client_pages?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
-              );
-            } catch {
-              // Continue with other businesses
+        while (bizUrl && !budgetExceeded()) {
+          const bizResponse = await (await fetchWithTimeout(bizUrl)).json();
+          if (bizResponse.data) {
+            for (const business of bizResponse.data) {
+              if (budgetExceeded()) break;
+              try {
+                await fetchPaginated(
+                  `${META_FACEBOOK_GRAPH_URL}/${business.id}/owned_pages?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
+                );
+              } catch {
+                // Continue with other businesses
+              }
+
+              if (budgetExceeded()) break;
+              try {
+                await fetchPaginated(
+                  `${META_FACEBOOK_GRAPH_URL}/${business.id}/client_pages?fields=id,instagram_business_account,username,name,picture.type(large)&limit=100&access_token=${accessToken}`
+                );
+              } catch {
+                // Continue with other businesses
+              }
             }
           }
+          bizUrl = bizResponse.paging?.next;
         }
-        bizUrl = bizResponse.paging?.next;
+      } catch {
+        // Business Manager API not available for all users
       }
-    } catch {
-      // Business Manager API not available for all users
+    }
+
+    if (budgetExceeded()) {
+      console.warn(
+        `[Instagram.pages] budget de 90s estourado — retornando ${allFacebookPages.length} paginas coletadas ate agora`
+      );
     }
 
     const onlyConnectedAccounts = await Promise.all(
       allFacebookPages
         .filter((f: any) => f.instagram_business_account)
         .map(async (p: any) => {
-          return {
-            pageId: p.id,
-            ...(await (
-              await fetch(
-                `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${p.instagram_business_account.id}?fields=name,profile_picture_url&access_token=${accessToken}`
-              )
-            ).json()),
-            id: p.instagram_business_account.id,
-          };
+          try {
+            return {
+              pageId: p.id,
+              ...(await (
+                await fetchWithTimeout(
+                  `${META_FACEBOOK_GRAPH_URL}/${p.instagram_business_account.id}?fields=name,profile_picture_url&access_token=${accessToken}`
+                )
+              ).json()),
+              id: p.instagram_business_account.id,
+            };
+          } catch (err) {
+            // Pagina individual com timeout: ignora ao inves de quebrar tudo
+            return null;
+          }
         })
     );
 
-    return onlyConnectedAccounts.map((p: any) => ({
-      pageId: p.pageId,
-      id: p.id,
-      name: p.name,
-      picture: { data: { url: p.profile_picture_url } },
-    }));
+    return onlyConnectedAccounts
+      .filter((p): p is NonNullable<typeof p> => p !== null)
+      .map((p: any) => ({
+        pageId: p.pageId,
+        id: p.id,
+        name: p.name,
+        picture: { data: { url: p.profile_picture_url } },
+      }));
   }
 
   async fetchPageInformation(
@@ -634,13 +763,13 @@ export class InstagramProvider
     const [accessToken, userToken] = token.split('___');
     const { access_token, ...all } = await (
       await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${data.pageId}?fields=access_token,name,picture.type(large)&access_token=${accessToken}`
+        `${META_FACEBOOK_GRAPH_URL}/${data.pageId}?fields=access_token,name,picture.type(large)&access_token=${accessToken}`
       )
     ).json();
 
     const { id, name, profile_picture_url, username } = await (
       await fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${data.id}?fields=username,name,profile_picture_url&access_token=${accessToken}`
+        `${META_FACEBOOK_GRAPH_URL}/${data.id}?fields=username,name,profile_picture_url&access_token=${accessToken}`
       )
     ).json();
 
@@ -668,7 +797,7 @@ export class InstagramProvider
   ): Promise<string> {
     const { status_code, status } = await (
       await this.fetch(
-        `https://${type}/${META_GRAPH_API_VERSION}/${containerId}?access_token=${checkToken}&fields=status_code,status`,
+        `${metaGraphUrl(type)}/${containerId}?access_token=${checkToken}&fields=status_code,status`,
         undefined,
         '',
         0,
@@ -710,7 +839,7 @@ export class InstagramProvider
     try {
       const { permalink } = await (
         await this.fetch(
-          `https://${type}/${META_GRAPH_API_VERSION}/${mediaId}?fields=permalink&access_token=${checkToken}`
+          `${metaGraphUrl(type)}/${mediaId}?fields=permalink&access_token=${checkToken}`
         )
       ).json();
       return permalink;
@@ -750,6 +879,11 @@ export class InstagramProvider
           (firstPost?.media?.length || 0) > 1 && !isStory
             ? `&is_carousel_item=true`
             : ``;
+        const isReel =
+          hasExtension(m.path, 'mp4') &&
+          firstPost?.media?.length === 1 &&
+          !isStory;
+
         const mediaType = hasExtension(m.path, 'mp4')
           ? firstPost?.media?.length === 1
             ? isStory
@@ -807,9 +941,16 @@ export class InstagramProvider
               )}`
             : ``;
 
+        const coverUrl =
+          isReel &&
+          firstPost?.settings?.cover?.path &&
+          mediaType.indexOf('cover_url=') === -1
+            ? `&cover_url=${encodeURIComponent(firstPost.settings.cover.path)}`
+            : ``;
+
         const { id: photoId } = await (
           await this.fetch(
-            `https://${type}/${META_GRAPH_API_VERSION}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${trialParams}${audioConfiguration}&access_token=${accessToken}${caption}`,
+            `${metaGraphUrl(type)}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${trialParams}${audioConfiguration}${coverUrl}&access_token=${accessToken}${caption}`,
             {
               method: 'POST',
             }
@@ -950,7 +1091,7 @@ export class InstagramProvider
 
         const { id: mediaId } = await (
           await this.fetch(
-            `https://${pendingData.type}/${META_GRAPH_API_VERSION}/${igId}/media_publish?creation_id=${mediaCreationId}&access_token=${accessToken}&field=id`,
+            `${metaGraphUrl(pendingData.type)}/${igId}/media_publish?creation_id=${mediaCreationId}&access_token=${accessToken}&field=id`,
             {
               method: 'POST',
             }
@@ -979,7 +1120,7 @@ export class InstagramProvider
       // re-running this is safe)
       const { id: containerId } = await (
         await this.fetch(
-          `https://${pendingData.type}/${META_GRAPH_API_VERSION}/${igId}/media?caption=${encodeURIComponent(
+          `${metaGraphUrl(pendingData.type)}/${igId}/media?caption=${encodeURIComponent(
             pendingData.message || ''
           )}&media_type=CAROUSEL&children=${encodeURIComponent(
             pendingData.containers.join(',')
@@ -1009,7 +1150,7 @@ export class InstagramProvider
 
     const { id: mediaId } = await (
       await this.fetch(
-        `https://${pendingData.type}/${META_GRAPH_API_VERSION}/${igId}/media_publish?creation_id=${creationId}&access_token=${accessToken}&field=id`,
+        `${metaGraphUrl(pendingData.type)}/${igId}/media_publish?creation_id=${creationId}&access_token=${accessToken}&field=id`,
         {
           method: 'POST',
         }
@@ -1106,7 +1247,7 @@ export class InstagramProvider
 
     const { id: commentId } = await (
       await this.fetch(
-        `https://${type}/${META_GRAPH_API_VERSION}/${postId}/comments?message=${encodeURIComponent(
+        `${metaGraphUrl(type)}/${postId}/comments?message=${encodeURIComponent(
           commentPost.message
         )}&access_token=${accessToken}`,
         {
@@ -1118,7 +1259,7 @@ export class InstagramProvider
     // Get the permalink from the parent post
     const { permalink } = await (
       await this.fetch(
-        `https://${type}/${META_GRAPH_API_VERSION}/${postId}?fields=permalink&access_token=${
+        `${metaGraphUrl(type)}/${postId}?fields=permalink&access_token=${
           userToken || accessToken
         }`
       )
@@ -1180,6 +1321,7 @@ export class InstagramProvider
     id: string,
     token: string,
     date: number,
+    integration?: Integration,
     type = 'graph.facebook.com'
   ): Promise<AnalyticsData[]> {
     const [accessToken, userToken] = token.split('___');
@@ -1187,14 +1329,14 @@ export class InstagramProvider
     const since = dayjs().subtract(date, 'day').unix();
 
     const { data, ...all } = await (
-      await fetch(
-        `https://${type}/${META_GRAPH_API_VERSION}/${id}/insights?metric=follower_count,reach&access_token=${accessToken}&period=day&since=${since}&until=${until}`
+      await this.analyticsFetch(
+        `${metaGraphUrl(type)}/${id}/insights?metric=follower_count,reach&access_token=${accessToken}&period=day&since=${since}&until=${until}`
       )
     ).json();
 
     const { data: data2, ...all2 } = await (
-      await fetch(
-        `https://${type}/${META_GRAPH_API_VERSION}/${id}/insights?metric_type=total_value&metric=likes,views,comments,shares,saves,replies&access_token=${accessToken}&period=day&since=${since}&until=${until}`
+      await this.analyticsFetch(
+        `${metaGraphUrl(type)}/${id}/insights?metric_type=total_value&metric=likes,views,comments,shares,saves,replies&access_token=${accessToken}&period=day&since=${since}&until=${until}`
       )
     ).json();
     const analytics = [];
@@ -1228,7 +1370,7 @@ export class InstagramProvider
 
   music(accessToken: string, data: { q: string }) {
     return this.fetch(
-      `https://graph.facebook.com/${META_GRAPH_API_VERSION}/music/search?q=${encodeURIComponent(
+      `${META_FACEBOOK_GRAPH_URL}/music/search?q=${encodeURIComponent(
         data.q
       )}&access_token=${accessToken}`
     );
@@ -1263,7 +1405,7 @@ export class InstagramProvider
 
     const { audio } = await (
       await this.fetch(
-        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/ig_audio?audio_type=${audioType}&user_id=${internalId}${
+        `${META_FACEBOOK_GRAPH_URL}/ig_audio?audio_type=${audioType}&user_id=${internalId}${
           data?.q ? `&search_query=${encodeURIComponent(data.q)}` : ''
         }&access_token=${userToken || accessToken}`
       )
@@ -1288,6 +1430,7 @@ export class InstagramProvider
     token: string,
     postId: string,
     date: number,
+    integration?: Integration,
     type = 'graph.facebook.com'
   ): Promise<AnalyticsData[]> {
     const [accessToken, userToken] = token.split('___');
@@ -1296,8 +1439,8 @@ export class InstagramProvider
     try {
       // Fetch media insights from Instagram Graph API
       const { data } = await (
-        await fetch(
-          `https://${type}/${META_GRAPH_API_VERSION}/${postId}/insights?metric=views,reach,saved,likes,comments,shares&access_token=${accessToken}`
+        await this.analyticsFetch(
+          `${metaGraphUrl(type)}/${postId}/insights?metric=views,reach,saved,likes,comments,shares&access_token=${accessToken}`
         )
       ).json();
 
@@ -1348,8 +1491,384 @@ export class InstagramProvider
 
       return result;
     } catch (err) {
+      if (err instanceof RefreshToken) {
+        throw err;
+      }
       console.error('Error fetching Instagram post analytics:', err);
       return [];
     }
+  }
+
+  async sendDM(
+    accessToken: string,
+    igScopedUserId: string,
+    message: string,
+    type = 'graph.facebook.com'
+  ): Promise<{ recipientId: string; messageId: string }> {
+    // Instagram Login API (graph.instagram.com + IG User Token) uses /me/messages
+    // directly — the IG User Token already scopes to the IG business account,
+    // no Page ID resolution needed. Facebook Login (graph.facebook.com + Page
+    // Access Token) needs the Page ID from /me.
+    const url = type === 'graph.instagram.com'
+      ? `${metaGraphUrl(type)}/me/messages?access_token=${accessToken}`
+      : await this.resolvePageMessagesUrl(accessToken, type);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { id: igScopedUserId },
+        message: { text: message },
+      }),
+    });
+
+    const body = await response.json();
+    if (!response.ok || body.error) {
+      const errMsg =
+        body?.error?.message || JSON.stringify(body?.error || body);
+      throw new Error(`Instagram DM failed (${response.status}): ${errMsg}`);
+    }
+
+    return {
+      recipientId: body.recipient_id,
+      messageId: body.message_id,
+    };
+  }
+
+  private async resolvePageMessagesUrl(
+    accessToken: string,
+    type = 'graph.facebook.com'
+  ): Promise<string> {
+    const meRes = await fetch(
+      `${metaGraphUrl(type)}/me?access_token=${accessToken}`
+    );
+    const meBody = await meRes.json();
+    if (!meRes.ok || meBody.error) {
+      throw new Error(
+        `Failed to resolve Facebook Page ID: ${meBody?.error?.message || JSON.stringify(meBody)}`
+      );
+    }
+    return `${metaGraphUrl(type)}/${meBody.id}/messages?access_token=${accessToken}`;
+  }
+
+  // Send a private reply (DM) to someone who commented on your post.
+  // This is the Meta "private_replies" API — the ONLY supported way to DM
+  // a commenter without them having messaged you first. Valid for 7 days
+  // after the comment was created.
+  // Ref: https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/messaging-api/private-replies
+  async sendPrivateReply(
+    accessToken: string,
+    _igAccountId: string,
+    commentId: string,
+    message: string,
+    button?: InstagramDmButton,
+    type = 'graph.facebook.com'
+  ): Promise<{ recipientId: string; messageId: string }> {
+    // Instagram Login API (graph.instagram.com + IG User Token) hits /me/messages.
+    // Facebook Login (graph.facebook.com + Page Access Token) needs the Page ID.
+    // Must be sent within 7 days of the comment in both flows.
+    const url = type === 'graph.instagram.com'
+      ? `${metaGraphUrl(type)}/me/messages?access_token=${accessToken}`
+      : await this.resolvePageMessagesUrl(accessToken, type);
+
+    // When a CTA is provided, send as a button template (same schema as
+    // regular DMs). Text <= 640 chars, title <= 20 chars.
+    const messagePayload = button
+      ? {
+          attachment: {
+            type: 'template',
+            payload: {
+              template_type: 'button',
+              text: message.slice(0, 640),
+              buttons: [buildButton(button)],
+            },
+          },
+        }
+      : { text: message };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { comment_id: commentId },
+        message: messagePayload,
+      }),
+    });
+
+    const body = await response.json();
+    if (!response.ok || body.error) {
+      const errMsg =
+        body?.error?.message || JSON.stringify(body?.error || body);
+      throw new Error(
+        `Instagram private reply failed (${response.status}): ${errMsg}`
+      );
+    }
+
+    return {
+      recipientId: body.recipient_id,
+      messageId: body.message_id,
+    };
+  }
+
+  // Reply to an existing IG comment (threaded reply).
+  // Ref: https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment/replies
+  async replyToComment(
+    accessToken: string,
+    commentId: string,
+    message: string,
+    type = 'graph.facebook.com'
+  ): Promise<{ id: string }> {
+    // Both flows support threaded replies at /{comment-id}/replies — route
+    // depends on which token the integration holds (Page Access vs IG User).
+    const url = `${metaGraphUrl(type)}/${commentId}/replies?access_token=${accessToken}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const body = await response.json();
+    if (!response.ok || body.error) {
+      const err = body?.error || {};
+      const parts = [
+        err.message ? `msg=${err.message}` : null,
+        err.code != null ? `code=${err.code}` : null,
+        err.error_subcode != null ? `subcode=${err.error_subcode}` : null,
+        err.type ? `type=${err.type}` : null,
+        err.fbtrace_id ? `trace=${err.fbtrace_id}` : null,
+      ].filter(Boolean);
+      const detail = parts.length ? parts.join(' ') : JSON.stringify(body);
+      throw new Error(
+        `Instagram comment reply failed (${response.status}) [host=${type} commentId=${commentId}]: ${detail}`
+      );
+    }
+    return { id: body.id };
+  }
+
+  async subscribeToWebhooks(
+    igAccountId: string,
+    pageAccessToken: string,
+    type = 'graph.facebook.com'
+  ): Promise<boolean> {
+    // For Instagram webhooks (comments, messages), subscribe the IG Business
+    // account directly with instagram-specific fields.
+    const response = await this.fetch(
+      `${metaGraphUrl(type)}/${igAccountId}/subscribed_apps?subscribed_fields=comments,messages&access_token=${pageAccessToken}`,
+      { method: 'POST' }
+    );
+
+    const body = await response.json();
+    if (body.error) {
+      throw new Error(
+        `Webhook subscription failed: ${body.error.message || JSON.stringify(body.error)}`
+      );
+    }
+
+    return body.success === true;
+  }
+
+  async checkWebhookSubscription(
+    igAccountId: string,
+    pageAccessToken: string,
+    type = 'graph.facebook.com'
+  ): Promise<{ subscribed: boolean; fields: string[] }> {
+    // Non-destructive check: reads the current subscription state for this
+    // IG account and returns the subscribed fields. In the Meta Use Cases
+    // model the subscription is configured in the Dashboard — this endpoint
+    // reflects that state.
+    const response = await this.fetch(
+      `${metaGraphUrl(type)}/${igAccountId}/subscribed_apps?access_token=${pageAccessToken}`
+    );
+    const body = await response.json();
+    if (body.error) {
+      throw new Error(
+        `Webhook check failed: ${body.error.message || JSON.stringify(body.error)}`
+      );
+    }
+    const apps: Array<{ subscribed_fields?: string[] }> = Array.isArray(
+      body.data
+    )
+      ? body.data
+      : [];
+    const fields = apps.flatMap((app) => app.subscribed_fields || []);
+    return { subscribed: apps.length > 0, fields };
+  }
+
+  async getPageIdForIgAccount(
+    pageAccessToken: string,
+    igAccountId: string,
+    type = 'graph.facebook.com'
+  ): Promise<string | null> {
+    try {
+      // The page access token is scoped to a specific page.
+      // We can get the page ID by calling /me with the page token.
+      const response = await this.fetch(
+        `${metaGraphUrl(type)}/me?fields=id&access_token=${pageAccessToken}`
+      );
+      const body = await response.json();
+      if (body.id) {
+        return body.id;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async ensureWebhookSubscription(
+    pageAccessToken: string,
+    igAccountId: string,
+    type = 'graph.facebook.com'
+  ): Promise<boolean> {
+    // Instagram webhooks are subscribed directly on the IG account, not the Page.
+    return this.subscribeToWebhooks(igAccountId, pageAccessToken, type);
+  }
+
+  async getMediaMetadata(
+    mediaId: string,
+    accessToken: string,
+    type = 'graph.facebook.com'
+  ): Promise<{
+    id: string;
+    permalink?: string;
+    caption?: string;
+    thumbnailUrl?: string;
+    mediaType?: string;
+    isAd?: boolean;
+  }> {
+    // boost_eligibility_info so existe em "Instagram API with Facebook Login"
+    // (host graph.facebook.com). "Instagram API with Instagram Login"
+    // (host graph.instagram.com / standalone) NAO expoe esse campo —
+    // documentado em https://developers.facebook.com/docs/instagram-platform/reference/instagram-media
+    // Quando sabemos pelo host que nao vai funcionar, pulamos o campo direto.
+    // Caso o host nao seja reconhecido, o retry abaixo cobre como safety net.
+    const baseFields =
+      'id,caption,media_type,media_url,thumbnail_url,permalink';
+    const supportsBoostField = type.includes('graph.facebook.com');
+    const withBoost = `${baseFields},boost_eligibility_info`;
+    const initialFields = supportsBoostField ? withBoost : baseFields;
+
+    const tryFetch = async (fields: string) => {
+      const response = await fetch(
+        `${metaGraphUrl(type)}/${mediaId}?fields=${fields}&access_token=${accessToken}`
+      );
+      const body = await response.json();
+      return { response, body };
+    };
+
+    let { response, body } = await tryFetch(initialFields);
+    if (
+      supportsBoostField &&
+      (!response.ok || body?.error)
+    ) {
+      const message: string = body?.error?.message ?? '';
+      const isNonexistingField =
+        /nonexisting field/i.test(message) &&
+        /boost_eligibility_info/i.test(message);
+      if (isNonexistingField) {
+        // Defensive: host eh facebook mas o app type nao suporta o campo.
+        ({ response, body } = await tryFetch(baseFields));
+      }
+    }
+
+    if (!response.ok || body?.error) {
+      throw new Error(
+        `IG getMediaMetadata failed (HTTP ${response.status}): ${
+          body?.error?.message ?? JSON.stringify(body).slice(0, 200)
+        }`
+      );
+    }
+
+    const eligibleToBoost = body?.boost_eligibility_info?.eligible_to_boost;
+    const isAd =
+      typeof eligibleToBoost === 'boolean' ? !eligibleToBoost : undefined;
+
+    return {
+      id: body.id,
+      permalink: body.permalink,
+      caption: body.caption,
+      thumbnailUrl: body.thumbnail_url ?? body.media_url,
+      mediaType: body.media_type,
+      isAd,
+    };
+  }
+
+  async getRecentMedia(
+    igAccountId: string,
+    accessToken: string,
+    type = 'graph.facebook.com',
+    limit = 25,
+    after?: string
+  ): Promise<{
+    posts: Array<{
+      id: string;
+      caption?: string;
+      mediaType: string;
+      mediaUrl?: string;
+      thumbnailUrl?: string;
+      permalink?: string;
+      timestamp?: string;
+    }>;
+    nextCursor: string | null;
+  }> {
+    const fields =
+      'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp';
+    const cursor = after ? `&after=${after}` : '';
+    const response = await fetch(
+      `${metaGraphUrl(type)}/${igAccountId}/media?fields=${fields}&limit=${limit}&access_token=${accessToken}${cursor}`
+    );
+    const body = await response.json();
+    if (!response.ok || !body.data) {
+      return { posts: [], nextCursor: null };
+    }
+    return {
+      posts: body.data.map((m: any) => ({
+        id: m.id,
+        caption: m.caption,
+        mediaType: m.media_type,
+        mediaUrl: m.media_url,
+        thumbnailUrl: m.thumbnail_url,
+        permalink: m.permalink,
+        timestamp: m.timestamp,
+      })),
+      nextCursor: body.paging?.cursors?.after ?? null,
+    };
+  }
+
+  async getRecentStories(
+    igAccountId: string,
+    accessToken: string,
+    type = 'graph.facebook.com'
+  ): Promise<{
+    stories: Array<{
+      id: string;
+      caption?: string;
+      mediaType: string;
+      mediaUrl?: string;
+      thumbnailUrl?: string;
+      permalink?: string;
+      timestamp?: string;
+    }>;
+  }> {
+    // Instagram Graph API only exposes active stories (last 24h) via this edge.
+    const fields =
+      'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp';
+    const response = await fetch(
+      `${metaGraphUrl(type)}/${igAccountId}/stories?fields=${fields}&access_token=${accessToken}`
+    );
+    const body = await response.json();
+    if (!response.ok || !body.data) {
+      return { stories: [] };
+    }
+    return {
+      stories: body.data.map((m: any) => ({
+        id: m.id,
+        caption: m.caption,
+        mediaType: m.media_type,
+        mediaUrl: m.media_url,
+        thumbnailUrl: m.thumbnail_url,
+        permalink: m.permalink,
+        timestamp: m.timestamp,
+      })),
+    };
   }
 }

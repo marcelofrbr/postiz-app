@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   NotFoundException,
   ValidationPipe,
@@ -9,6 +10,7 @@ import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.
 import dayjs from 'dayjs';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import {
+  CommentKind,
   Integration,
   Post,
   Media,
@@ -36,6 +38,7 @@ import sharp from 'sharp';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { Readable } from 'stream';
 import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { AiTextService } from '@gitroom/nestjs-libraries/ai/ai-text.service';
 dayjs.extend(utc);
 import * as Sentry from '@sentry/nestjs';
 import { TemporalService } from 'nestjs-temporal-core';
@@ -57,6 +60,10 @@ import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validatio
 import { postContentPlainText } from '@gitroom/helpers/utils/sanitize.post.content';
 import { CreatePublicCommentDto } from '@gitroom/nestjs-libraries/dtos/comments/add.comment.dto';
 import { countLength } from '@gitroom/helpers/utils/count.length';
+import { StatusEventService } from '@gitroom/nestjs-libraries/database/prisma/status/status-event.service';
+import { selectPostWorkflowVersion } from '@gitroom/nestjs-libraries/temporal/post-workflow-version';
+import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.service';
+import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -74,7 +81,10 @@ export class PostsService {
     private _shortLinkService: ShortLinkService,
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _aiTextService: AiTextService,
+    private _encryption: EncryptionService,
+    private _statusEventService: StatusEventService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -144,6 +154,10 @@ export class PostsService {
       }
     }
 
+    getIntegration.token = decryptIntegrationToken(
+      this._encryption,
+      getIntegration.token
+    );
     try {
       return await integrationProvider.missing(
         getIntegration.internalId,
@@ -159,7 +173,7 @@ export class PostsService {
     return [];
   }
 
-  async getPostById(postId: string, orgId: string) {
+  async getPostById(postId: string, orgId?: string) {
     return this._postRepository.getPostById(postId, orgId);
   }
 
@@ -311,10 +325,15 @@ export class PostsService {
     orgId: string,
     postId: string,
     date: number,
-    forceRefresh = false
+    forceRefresh = false,
+    profileId?: string
   ): Promise<AnalyticsData[] | { missing: true }> {
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post || !post.releaseId) {
+      return [];
+    }
+
+    if (profileId && post.profileId && post.profileId !== profileId) {
       return [];
     }
 
@@ -364,6 +383,10 @@ export class PostsService {
     //   return JSON.parse(getIntegrationData);
     // }
 
+    getIntegration.token = decryptIntegrationToken(
+      this._encryption,
+      getIntegration.token
+    );
     try {
       const { releaseId } = await this.resolveRelease(orgId, post);
 
@@ -371,7 +394,8 @@ export class PostsService {
         getIntegration.internalId,
         getIntegration.token,
         releaseId,
-        date
+        date,
+        getIntegration
       );
       await ioRedis.set(
         `integration:${orgId}:${post.id}:${date}`,
@@ -385,7 +409,7 @@ export class PostsService {
     } catch (e) {
       // Retry once with a refreshed token
       if (e instanceof RefreshToken && !forceRefresh) {
-        return this.checkPostAnalytics(orgId, postId, date, true);
+        return this.checkPostAnalytics(orgId, postId, date, true, profileId);
       }
       console.log(e);
     }
@@ -446,7 +470,7 @@ export class PostsService {
       skipMissingProperties: false,
       transform: true,
       transformOptions: {
-        enableImplicitConversion: true,
+        enableImplicitConversion: false,
       },
     });
 
@@ -486,19 +510,19 @@ export class PostsService {
     ];
   }
 
-  async getPosts(orgId: string, query: GetPostsDto) {
-    return this._postRepository.getPosts(orgId, query);
+  async getPosts(orgId: string, query: GetPostsDto, profileId?: string) {
+    return this._postRepository.getPosts(orgId, query, profileId);
   }
 
-  async getPostsMinified(orgId: string, query: GetPostsDto) {
+  async getPostsMinified(orgId: string, query: GetPostsDto, profileId?: string) {
     return minifyPosts({
-      posts: await this._postRepository.getPosts(orgId, query),
+      posts: await this._postRepository.getPosts(orgId, query, profileId),
     });
   }
 
-  async getPostsList(orgId: string, query: GetPostsListDto) {
+  async getPostsList(orgId: string, query: GetPostsListDto, profileId?: string) {
     return minifyPostsList(
-      await this._postRepository.getPostsList(orgId, query)
+      await this._postRepository.getPostsList(orgId, query, profileId)
     );
   }
 
@@ -860,8 +884,8 @@ export class PostsService {
       });
   }
 
-  async deletePost(orgId: string, group: string) {
-    const post = await this._postRepository.deletePost(orgId, group);
+  async deletePost(orgId: string, group: string, profileId?: string) {
+    const post = await this._postRepository.deletePost(orgId, group, profileId);
 
     if (post?.id) {
       try {
@@ -905,7 +929,8 @@ export class PostsService {
     taskQueue: string,
     postId: string,
     orgId: string,
-    state: State
+    state: State,
+    integration: { id: string; providerIdentifier: string }
   ) {
     try {
       const workflows = this._temporalService.client
@@ -934,9 +959,15 @@ export class PostsService {
     }
 
     try {
+      // V112 (oficial) e o padrao; V113 so por gate de env e Zernio preso ao
+      // V102 (regra interna de selectPostWorkflowVersion).
+      const workflowName = selectPostWorkflowVersion({
+        integrationId: integration.id,
+        providerIdentifier: integration.providerIdentifier,
+      });
       await this._temporalService.client
         .getRawClient()
-        ?.workflow.start('postWorkflowV112', {
+        ?.workflow.start(workflowName, {
           workflowId: `post_${postId}`,
           taskQueue: 'main',
           workflowIdConflictPolicy: 'TERMINATE_EXISTING',
@@ -1116,21 +1147,61 @@ export class PostsService {
     orgId: string,
     body: CreatePostDto,
     creationMethod: CreationMethod,
-    keepGroup = false
+    keepGroup = false,
+    profileId?: string
   ): Promise<any[]> {
+    const existingPostIds = [
+      ...new Set(
+        body.posts.flatMap((post) =>
+          (post.value || []).flatMap((value) => (value.id ? [value.id] : []))
+        )
+      ),
+    ];
+    const existingPosts = [];
+
+    for (const existingPostId of existingPostIds) {
+      const existingPost = await this._postRepository.getPostById(
+        existingPostId,
+        orgId
+      );
+      if (!existingPost) {
+        // `value[].id` nao e necessariamente um post existente: a UI gera o id
+        // com `makeId(10)` antes de salvar e o upsert cria a linha com ele.
+        // So e sequestro quando o id ja existe fora desta organizacao, porque
+        // ai o `where: { id }` do upsert alcancaria o post alheio. Um id que
+        // nao existe em lugar nenhum e simplesmente um post novo.
+        const foreignPost = await this._postRepository.getPostById(
+          existingPostId
+        );
+        if (foreignPost) {
+          // Mesma mensagem do caso inexistente, de proposito: nao confirmar a
+          // existencia de um post de outra organizacao.
+          throw new BadRequestException('Post not found');
+        }
+        continue;
+      }
+      if (
+        profileId &&
+        existingPost.profileId &&
+        existingPost.profileId !== profileId
+      ) {
+        throw new BadRequestException('Post does not belong to this profile');
+      }
+      existingPosts.push(existingPost);
+    }
+
+    if (
+      (body.type === 'schedule' || body.type === 'now') &&
+      body.republish !== true
+    ) {
+      for (const existingPost of existingPosts) {
+        this.guardAgainstRepublish(existingPost, 'createPost');
+      }
+    }
+
     const postList = [];
     const batchId = uuidv4();
     for (const post of body.posts) {
-      if (
-        (body.type === 'schedule' || body.type === 'now') &&
-        !body.republish &&
-        post.value?.[0]?.id
-      ) {
-        this.guardAgainstRepublish(
-          await this._postRepository.getPostById(post.value[0].id, orgId),
-          'createPost'
-        );
-      }
       const provider = this._integrationManager.getSocialIntegration(
         (post.settings as any)?.__type
       );
@@ -1151,6 +1222,19 @@ export class PostsService {
         content: removeLinks ? stripLinks(updateContent[i]) : updateContent[i],
       }));
 
+      // Posts inherit the profile of their target channel when no explicit
+      // profileId is provided (e.g. org-scoped public API / MCP keys). Without
+      // this, the post is created orphaned (profileId NULL) and stays invisible
+      // in every profile-filtered calendar until the startup orphan migration.
+      let effectiveProfileId = profileId;
+      if (!effectiveProfileId && post?.integration?.id) {
+        const integration = await this._integrationService.getIntegrationById(
+          orgId,
+          post.integration.id
+        );
+        effectiveProfileId = integration?.profileId ?? undefined;
+      }
+
       const { posts } = await this._postRepository.createOrUpdatePost(
         body.type,
         orgId,
@@ -1162,7 +1246,8 @@ export class PostsService {
         creationMethod,
         body.inter,
         keepGroup,
-        batchId
+        batchId,
+        effectiveProfileId
       );
 
       if (!posts?.length) {
@@ -1176,10 +1261,16 @@ export class PostsService {
 
       if (body.type !== 'update') {
         this.startWorkflow(
-          post.settings.__type.split('-')[0].toLowerCase(),
+          post.settings.__type.startsWith('zernio-')
+            ? 'main'
+            : post.settings.__type.split('-')[0].toLowerCase(),
           posts[0].id,
           orgId,
-          posts[0].state
+          posts[0].state,
+          {
+            id: post.integration.id,
+            providerIdentifier: post.settings.__type,
+          }
         ).catch((err) => {});
       }
 
@@ -1340,12 +1431,54 @@ export class PostsService {
     };
   }
 
-  async separatePosts(content: string, len: number) {
-    return this._openaiService.separatePosts(content, len);
+  async separatePosts(
+    orgId: string,
+    content: string,
+    len: number,
+    profileId?: string
+  ) {
+    return this._aiTextService.separatePosts(orgId, content, len, profileId);
   }
 
   async changeState(id: string, state: State, err?: any, body?: any) {
-    return this._postRepository.changeState(id, state, err, body);
+    const updated = await this._postRepository.changeState(id, state, err, body);
+
+    if (state === 'ERROR') {
+      // Histórico (fail-soft): registra a falha de publicação com snapshot do
+      // canal. Mensagem SANITIZADA (name+message) — NUNCA `JSON.stringify(err)`
+      // (o corpo cru pode conter refresh_token/client_secret, é o vazamento que
+      // a Fase 1 tirou da API). O snapshot vem do próprio retorno, sem query extra.
+      await this._statusEventService.record({
+        organizationId: updated.organizationId,
+        type: 'POST_FAILED',
+        severity: 'CRITICAL',
+        message: this.sanitizeErrorMessage(err),
+        profileId: updated.profileId ?? null,
+        integrationId: updated.integrationId ?? null,
+        channelName: updated.integration?.name ?? null,
+        channelPicture: updated.integration?.picture ?? null,
+        providerIdentifier: updated.integration?.providerIdentifier ?? null,
+        entityId: updated.id,
+      });
+    }
+
+    return updated;
+  }
+
+  // Extrai apenas name+message do erro de publicação para o log — NUNCA o corpo
+  // serializado (que pode carregar o token). Objetos sem forma de Error viram
+  // null (não serializamos). O cap de tamanho final é aplicado no StatusEventService.
+  private sanitizeErrorMessage(err?: any): string | null {
+    if (err == null) {
+      return null;
+    }
+    if (typeof err === 'string') {
+      return err;
+    }
+    if (err instanceof Error || (err?.name && err?.message)) {
+      return `${err.name}: ${err.message}`;
+    }
+    return null;
   }
 
   async changePostStatus(
@@ -1363,10 +1496,18 @@ export class PostsService {
 
     try {
       await this.startWorkflow(
-        getPostById.integration.providerIdentifier.split('-')[0].toLowerCase(),
+        getPostById.integration.providerIdentifier.startsWith('zernio-')
+          ? 'main'
+          : getPostById.integration.providerIdentifier
+              .split('-')[0]
+              .toLowerCase(),
         getPostById.id,
         orgId,
-        state
+        state,
+        {
+          id: getPostById.integration.id,
+          providerIdentifier: getPostById.integration.providerIdentifier,
+        }
       );
     } catch (err) {}
 
@@ -1377,10 +1518,19 @@ export class PostsService {
     orgId: string,
     id: string,
     date: string,
-    action: 'schedule' | 'update' = 'schedule',
-    republish = false
+    action: 'schedule' | 'update' = 'update',
+    republish = false,
+    profileId?: string
   ) {
     const getPostById = await this._postRepository.getPostById(id, orgId);
+
+    if (
+      profileId &&
+      getPostById?.profileId &&
+      getPostById.profileId !== profileId
+    ) {
+      throw new BadRequestException('Post does not belong to this profile');
+    }
 
     if (action === 'schedule' && !republish) {
       this.guardAgainstRepublish(getPostById, 'changeDate');
@@ -1399,12 +1549,16 @@ export class PostsService {
     if (action === 'schedule') {
       try {
         await this.startWorkflow(
-          getPostById.integration.providerIdentifier
-            .split('-')[0]
-            .toLowerCase(),
+          getPostById.integration.providerIdentifier.startsWith('zernio-')
+            ? 'main'
+            : getPostById.integration.providerIdentifier.split('-')[0].toLowerCase(),
           getPostById.id,
           orgId,
-          getPostById.state === 'DRAFT' ? 'DRAFT' : 'QUEUE'
+          getPostById.state === 'DRAFT' ? 'DRAFT' : 'QUEUE',
+          {
+            id: getPostById.integration.id,
+            providerIdentifier: getPostById.integration.providerIdentifier,
+          }
         );
       } catch (err) {}
     }
@@ -1412,9 +1566,9 @@ export class PostsService {
     return newDate;
   }
 
-  async generatePostsDraft(orgId: string, body: CreateGeneratedPostsDto) {
+  async generatePostsDraft(orgId: string, body: CreateGeneratedPostsDto, profileId?: string) {
     const getAllIntegrations = (
-      await this._integrationService.getIntegrationsList(orgId)
+      await this._integrationService.getIntegrationsList(orgId, profileId)
     ).filter((f) => !f.disabled && f.providerIdentifier !== 'reddit');
 
     // const posts = chunk(body.posts, getAllIntegrations.length);
@@ -1491,7 +1645,9 @@ export class PostsService {
               },
             ],
           },
-          'WEB'
+          'WEB',
+          false,
+          profileId
         );
       }
     }
@@ -1509,7 +1665,7 @@ export class PostsService {
     return this._postRepository.findPopularPosts(category, topic);
   }
 
-  async findFreeDateTime(orgId: string, integrationId?: string) {
+  async findFreeDateTime(orgId: string, integrationId?: string, profileId?: string) {
     const findTimes = await this._integrationService.findFreeDateTime(
       orgId,
       integrationId
@@ -1518,7 +1674,8 @@ export class PostsService {
       orgId,
       findTimes.length ? findTimes : [120, 400, 700],
       dayjs.utc().startOf('day'),
-      0
+      0,
+      profileId
     );
   }
 
@@ -1535,7 +1692,8 @@ export class PostsService {
     orgId: string,
     times: number[],
     date: dayjs.Dayjs,
-    daysChecked: number
+    daysChecked: number,
+    profileId?: string
   ): Promise<string> {
     // stop searching after a year so an empty times list can never recurse forever
     if (daysChecked > 365) {
@@ -1548,7 +1706,8 @@ export class PostsService {
     const list = await this._postRepository.getPostsCountsByDates(
       orgId,
       times,
-      date
+      date,
+      profileId
     );
 
     if (!list.length) {
@@ -1556,7 +1715,8 @@ export class PostsService {
         orgId,
         times,
         date.add(1, 'day'),
-        daysChecked + 1
+        daysChecked + 1,
+        profileId
       );
     }
 
@@ -1661,6 +1821,7 @@ export class PostsService {
       userId,
       post.id,
       body.content,
+      'COMMENT',
       {
         displayName: userId ? undefined : body.displayName!.trim(),
         parentId: body.parentId,
@@ -1736,19 +1897,68 @@ export class PostsService {
     }
   }
 
-  getTags(orgId: string) {
-    return this._postRepository.getTags(orgId);
+  // Fluxo autenticado (membro da org) — escopado por org e perfil.
+  async getReviewComments(
+    orgId: string,
+    postId: string,
+    requireProfileId?: string | null
+  ) {
+    await this.assertPostReviewAccess(orgId, postId, requireProfileId);
+    return this._postRepository.getComments(postId, orgId);
   }
 
-  createTag(orgId: string, body: CreateTagDto) {
-    return this._postRepository.createTag(orgId, body);
+  // Valida que o post pertence a org e, para membro restrito (org-USER), que
+  // esta no perfil dele — impede revisar/ler comentarios de outro perfil.
+  private async assertPostReviewAccess(
+    orgId: string,
+    postId: string,
+    requireProfileId?: string | null
+  ) {
+    const post = await this._postRepository.getPostProfileScope(orgId, postId);
+    if (!post) {
+      throw new HttpException('Post not found', 404);
+    }
+    if (requireProfileId !== undefined && post.profileId !== requireProfileId) {
+      throw new HttpException('Post is not in your profile', 403);
+    }
   }
 
-  editTag(id: string, orgId: string, body: CreateTagDto) {
-    return this._postRepository.editTag(id, orgId, body);
+  async createReview(
+    orgId: string,
+    userId: string,
+    postId: string,
+    params: {
+      kind: CommentKind;
+      content: string;
+      requireProfileId?: string | null;
+    }
+  ) {
+    await this.assertPostReviewAccess(orgId, postId, params.requireProfileId);
+    if (params.kind === 'COMMENT' && !params.content?.trim()) {
+      throw new HttpException('Comment is required', 400);
+    }
+    return this._postRepository.createComment(
+      orgId,
+      userId,
+      postId,
+      params.content ?? '',
+      params.kind
+    );
   }
 
-  deleteTag(id: string, orgId: string) {
-    return this._postRepository.deleteTag(id, orgId);
+  getTags(orgId: string, profileId?: string) {
+    return this._postRepository.getTags(orgId, profileId);
+  }
+
+  createTag(orgId: string, body: CreateTagDto, profileId?: string) {
+    return this._postRepository.createTag(orgId, body, profileId);
+  }
+
+  editTag(id: string, orgId: string, body: CreateTagDto, profileId?: string) {
+    return this._postRepository.editTag(id, orgId, body, profileId);
+  }
+
+  deleteTag(id: string, orgId: string, profileId?: string) {
+    return this._postRepository.deleteTag(id, orgId, profileId);
   }
 }

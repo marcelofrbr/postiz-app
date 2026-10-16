@@ -1,11 +1,13 @@
 'use client';
 
 import { FC, useCallback } from 'react';
+import { useT } from '@gitroom/react/translation/get.transation.service.client';
 
 export const HeadingComponent: FC<{
   editor: any;
   currentValue: string;
 }> = ({ editor }) => {
+  const t = useT();
   const setHeading = (level: number) => () => {
     editor?.commands?.unsetUnderline();
     editor?.commands?.unsetBold();
@@ -32,7 +34,7 @@ export const HeadingComponent: FC<{
       </svg>
       <div
         data-tooltip-id="tooltip"
-        data-tooltip-content="Title"
+        data-tooltip-content={t('label_title', 'Title')}
         className="flex p-[10px] gap-[5px] -left-[50%] rounded-[6px] bottom-[100%] opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 bg-newColColor border border-newColColor z-[100] absolute transition-all mobile:static mobile:p-0 mobile:gap-[4px] mobile:opacity-100 mobile:pointer-events-auto mobile:bg-transparent mobile:border-0"
       >
         <div

@@ -1,46 +1,67 @@
 import { Agent } from 'undici';
 import axios, { AxiosInstance } from 'axios';
 import dns from 'node:dns';
-import net from 'node:net';
+import net, { LookupFunction } from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
-import { isBlockedIp } from './webhook.url.validator';
+import { isBlockedIp, isSsrfProtectionDisabled } from './webhook.url.validator';
 
 // Pins DNS resolution: every resolved IP is checked with `isBlockedIp` and
-// the caller connects to that same set. Closes the TOCTOU window
+// the caller (undici) connects to that same set. Closes the TOCTOU window
 // `isSafePublicHttpsUrl` alone leaves open (see GHSA-f7jj-p389-4w45).
-function ssrfSafeLookup(
+type SsrfLookupCallback = (
+  error: NodeJS.ErrnoException | null,
+  address: any,
+  family?: number
+) => void;
+
+/**
+ * Lookup compartilhado por Undici e Axios. A verificacao acontece no momento
+ * da conexao e o cliente usa exatamente o endereco aprovado, fechando a janela
+ * de DNS rebinding entre uma validacao previa e o request real.
+ */
+export function ssrfSafeLookup(
   hostname: string,
   options: any,
-  callback: (
-    err: NodeJS.ErrnoException | null,
-    address: any,
-    family?: number
-  ) => void
-) {
+  callback: SsrfLookupCallback
+): void {
   if (net.isIP(hostname)) {
     const family = net.isIP(hostname);
     if (isBlockedIp(hostname)) {
-      return callback(new Error('Blocked IP'), '', 0);
+      callback(new Error('Blocked IP'), '', 0);
+      return;
     }
-    return options && (options as any).all
-      ? callback(null, [{ address: hostname, family }] as any, family)
-      : callback(null, hostname, family);
+
+    if (options?.all) {
+      callback(null, [{ address: hostname, family }], family);
+      return;
+    }
+
+    callback(null, hostname, family);
+    return;
   }
 
-  dns.lookup(hostname, options, (err, address: any, family: any) => {
-    if (err) return callback(err, '', 0);
+  dns.lookup(hostname, options, (error, address: any, family: any) => {
+    if (error) {
+      callback(error, '', 0);
+      return;
+    }
+
     if (Array.isArray(address)) {
-      for (const entry of address) {
-        if (isBlockedIp(entry.address)) {
-          return callback(new Error('Blocked IP'), '', 0);
-        }
+      if (address.some((entry) => isBlockedIp(entry.address))) {
+        callback(new Error('Blocked IP'), '', 0);
+        return;
       }
-      return callback(null, address as any, 0);
+
+      callback(null, address, 0);
+      return;
     }
+
     if (isBlockedIp(address)) {
-      return callback(new Error('Blocked IP'), '', 0);
+      callback(new Error('Blocked IP'), '', 0);
+      return;
     }
+
     callback(null, address, family);
   });
 }
@@ -51,26 +72,38 @@ export const ssrfSafeDispatcher = new Agent({
   },
 });
 
-// axios can't use an undici dispatcher, but Node's http(s) agents accept the
-// same `lookup` hook, so axios requests (providers that need form-data /
-// stream uploads) get the identical pinned-DNS guard as `this.fetch`.
 const ssrfSafeAxios = axios.create({
-  httpAgent: new http.Agent({ lookup: ssrfSafeLookup } as http.AgentOptions),
+  // Axios otherwise honors HTTP(S)_PROXY and the agent would validate only
+  // the proxy address while that proxy could still reach an internal target.
+  proxy: false,
+  httpAgent: new http.Agent({
+    lookup: ssrfSafeLookup as LookupFunction,
+  }),
   httpsAgent: new https.Agent({
-    lookup: ssrfSafeLookup,
-  } as https.AgentOptions),
+    lookup: ssrfSafeLookup as LookupFunction,
+  }),
 });
 
-// Self-hosters legitimately connect Postiz to WordPress/Mastodon/Lemmy/Listmonk
-// instances that live on a private network (e.g. the same Docker network or VPC).
-// Setting DISABLE_SSRF_PROTECTION=true opts those deployments out of the IP
-// guard. It stays ON by default so the hosted product is protected.
+/**
+ * Opt-out reservado a instalacoes self-hosted que precisam alcancar providers
+ * ou webhooks HTTPS dentro de uma rede privada confiavel.
+ */
 export function getSsrfSafeDispatcher(): Agent | undefined {
-  return process.env.DISABLE_SSRF_PROTECTION === 'true'
-    ? undefined
-    : ssrfSafeDispatcher;
+  return isSsrfProtectionDisabled() ? undefined : ssrfSafeDispatcher;
 }
 
 export function getSsrfSafeAxios(): AxiosInstance {
-  return process.env.DISABLE_SSRF_PROTECTION === 'true' ? axios : ssrfSafeAxios;
+  return isSsrfProtectionDisabled() ? axios : ssrfSafeAxios;
+}
+
+type UndiciRequestInit = RequestInit & { dispatcher?: Agent };
+
+export function ssrfSafeFetch(
+  input: Parameters<typeof fetch>[0],
+  init: UndiciRequestInit = {}
+): Promise<Response> {
+  return fetch(input, {
+    ...init,
+    dispatcher: init.dispatcher ?? getSsrfSafeDispatcher(),
+  } as RequestInit);
 }

@@ -18,6 +18,10 @@ import { Response, Request } from 'express';
 import { AuthService } from '@gitroom/backend/services/auth/auth.service';
 import { AuthService as AuthChecker } from '@gitroom/helpers/auth/auth.service';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
+import { GetProfileFromRequest } from '@gitroom/nestjs-libraries/user/profile.from.request';
+import { getOrgRole } from '@gitroom/nestjs-libraries/user/org.role';
+import { SkipProfileAccess } from '@gitroom/nestjs-libraries/services/auth/profile-access/profile-access.decorators';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { getCookieUrlFromDomain } from '@gitroom/helpers/subdomain/subdomain.management';
 import { pricing } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/pricing';
@@ -37,6 +41,10 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 
 @ApiTags('User')
+// Rotas de identidade/sessao precisam responder para org USER sem perfil
+// atribuido (o frontend depende de /user/self para renderizar o estado
+// "aguardando atribuicao de perfil").
+@SkipProfileAccess()
 @Controller('/user')
 export class UsersController {
   constructor(
@@ -45,7 +53,8 @@ export class UsersController {
     private _authService: AuthService,
     private _orgService: OrganizationService,
     private _userService: UsersService,
-    private _trackService: TrackService
+    private _trackService: TrackService,
+    private _profileService: ProfileService
   ) {}
 
   @Get('/chatbase-token')
@@ -83,6 +92,7 @@ export class UsersController {
   async getSelf(
     @GetUserFromRequest() user: User,
     @GetOrgFromRequest() organization: Organization,
+    @GetProfileFromRequest() profile: any,
     @Req() req: Request
   ) {
     if (!organization) {
@@ -120,6 +130,16 @@ export class UsersController {
         organization?.users[0]?.role === 'ADMIN'
           ? organization?.apiKey
           : '',
+      // @ts-ignore
+      profileApiKey: organization?.users[0]?.role === 'SUPERADMIN' || organization?.users[0]?.role === 'ADMIN' ? (profile?.apiKey ?? null) : null,
+      profileId: profile?.id || null,
+      profileName: profile?.name || null,
+      // Papel no perfil ativo (VIEWER/EDITOR/MANAGER/OWNER; admin da org =
+      // OWNER implicito). Usado pelo frontend para esconder acoes de escrita.
+      // @ts-ignore
+      profileRole: req.profileRole ?? null,
+      // @ts-ignore
+      profileAccess: req.profileAccess ?? null,
     };
   }
 
@@ -271,7 +291,9 @@ export class UsersController {
       user.id,
       getOrgFromCookie.id,
       getOrgFromCookie.orgId,
-      getOrgFromCookie.role
+      getOrgFromCookie.role,
+      getOrgFromCookie.profileIds,
+      getOrgFromCookie.profileRole
     );
 
     response.status(200).json({
@@ -355,6 +377,42 @@ export class UsersController {
     await this._userService.deleteAccount(user.id);
 
     return this.logout(response);
+  }
+
+  @Post('/change-profile')
+  changeProfile(
+    @Body('id') id: string,
+    @Res({ passthrough: true }) response: Response
+  ) {
+    response.cookie('showprofile', id, {
+      domain: getCookieUrlFromDomain(process.env.FRONTEND_URL!),
+      ...(!process.env.NOT_SECURED
+        ? {
+            secure: true,
+            httpOnly: true,
+            sameSite: 'none',
+          }
+        : {}),
+      expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+    });
+
+    if (process.env.NOT_SECURED) {
+      response.header('showprofile', id);
+    }
+
+    response.status(200).send();
+  }
+
+  @Get('/profiles')
+  async getProfiles(
+    @GetUserFromRequest() user: User,
+    @GetOrgFromRequest() org: Organization
+  ) {
+    return this._profileService.getAccessibleProfiles(
+      org.id,
+      user.id,
+      getOrgRole(org)
+    );
   }
 
   @Post('/logout')

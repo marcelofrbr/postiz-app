@@ -22,6 +22,7 @@ import { Select } from '@gitroom/react/form/select';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { AddEditModal } from '@gitroom/frontend/components/new-launch/add.edit.modal';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+import { consumeGeneratorStream } from './generator.stream';
 
 const FirstStep: FC = (props) => {
   const { integrations, reloadCalendarView } = useCalendar();
@@ -47,87 +48,53 @@ const FirstStep: FC = (props) => {
   const [research] = form.watch(['research']);
   const generateStep = useCallback(
     async (reader: ReadableStreamDefaultReader) => {
-      const decoder = new TextDecoder('utf-8');
-      let lastResponse = {} as any;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) return lastResponse.data.output;
-
-        // Convert chunked binary data to string
-        const chunkStr = decoder.decode(value, {
-          stream: true,
-        });
-        for (const chunk of chunkStr
-          .split('\n')
-          .filter((f) => f && f.indexOf('{') > -1)) {
-          let data: any;
-          try {
-            data = JSON.parse(chunk);
-          } catch (e) {
-            /** ignore partial / unparseable chunks **/
-            continue;
+      return consumeGeneratorStream(
+        reader,
+        (data) => {
+          switch (data.name) {
+            case 'agent':
+              setShowStep(t('agent_starting', 'Agent starting'));
+              break;
+            case 'research':
+              setShowStep(
+                t('researching_your_content', 'Researching your content...')
+              );
+              break;
+            case 'find-category':
+              setShowStep(
+                t('understanding_the_category', 'Understanding the category...')
+              );
+              break;
+            case 'find-topic':
+              setShowStep(t('finding_the_topic', 'Finding the topic...'));
+              break;
+            case 'find-popular-posts':
+              setShowStep(
+                t(
+                  'finding_popular_posts_to_match_with',
+                  'Finding popular posts to match with...'
+                )
+              );
+              break;
+            case 'generate-hook':
+              setShowStep(t('generating_hook', 'Generating hook...'));
+              break;
+            case 'generate-content':
+              setShowStep(t('generating_content', 'Generating content...'));
+              break;
+            case 'generate-picture':
+              setShowStep(t('generating_pictures', 'Generating pictures...'));
+              break;
+            case 'upload-pictures':
+              setShowStep(t('uploading_pictures', 'Uploading pictures...'));
+              break;
+            case 'post-time':
+              setShowStep(t('finding_time_to_post', 'Finding time to post...'));
+              break;
           }
-
-          // Server emits this when a node in the generation graph throws.
-          if (data?.error) {
-            throw new Error(
-              data.message ||
-                t('generation_failed', 'Failed to generate posts, please try again.')
-            );
-          }
-
-          {
-            switch (data.name) {
-              case 'agent':
-                setShowStep(t('agent_starting', 'Agent starting'));
-                break;
-              case 'research':
-                setShowStep(
-                  t('researching_your_content', 'Researching your content...')
-                );
-                break;
-              case 'find-category':
-                setShowStep(
-                  t(
-                    'understanding_the_category',
-                    'Understanding the category...'
-                  )
-                );
-                break;
-              case 'find-topic':
-                setShowStep(t('finding_the_topic', 'Finding the topic...'));
-                break;
-              case 'find-popular-posts':
-                setShowStep(
-                  t(
-                    'finding_popular_posts_to_match_with',
-                    'Finding popular posts to match with...'
-                  )
-                );
-                break;
-              case 'generate-hook':
-                setShowStep(t('generating_hook', 'Generating hook...'));
-                break;
-              case 'generate-content':
-                setShowStep(t('generating_content', 'Generating content...'));
-                break;
-              case 'generate-picture':
-                setShowStep(t('generating_pictures', 'Generating pictures...'));
-                break;
-              case 'upload-pictures':
-                setShowStep(t('uploading_pictures', 'Uploading pictures...'));
-                break;
-              case 'post-time':
-                setShowStep(
-                  t('finding_time_to_post', 'Finding time to post...')
-                );
-                break;
-            }
-            lastResponse = data;
-          }
-        }
-      }
+        },
+        t('generation_failed', 'Failed to generate posts, please try again.')
+      );
     },
     [t]
   );
@@ -136,23 +103,30 @@ const FirstStep: FC = (props) => {
   }> = useCallback(
     async (value) => {
       setLoading(true);
+      const fallbackMessage = t(
+        'generation_failed',
+        'Failed to generate posts, please try again.'
+      );
       try {
         const response = await fetch('/posts/generator', {
           method: 'POST',
           body: JSON.stringify(value),
         });
-        if (!response.body) {
-          throw new Error(
-            t('generation_failed', 'Failed to generate posts, please try again.')
-          );
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          const message = Array.isArray(detail?.message)
+            ? detail.message.join(' · ')
+            : typeof detail?.message === 'string'
+            ? detail.message
+            : fallbackMessage;
+          throw new Error(message);
         }
+        if (!response.body) throw new Error(fallbackMessage);
+
         const reader = response.body.getReader();
-        const load = await generateStep(reader);
-        if (!load?.content) {
-          throw new Error(
-            t('generation_failed', 'Failed to generate posts, please try again.')
-          );
-        }
+        const load = (await generateStep(reader)) as any;
+        if (!load?.content) throw new Error(fallbackMessage);
+
         const messages = load.content.map((p: any, index: number) => {
           if (index === 0) {
             return {
@@ -173,7 +147,6 @@ const FirstStep: FC = (props) => {
               : {}),
           };
         });
-        setShowStep('');
         modal.openModal({
           id: 'add-edit-modal',
           closeOnClickOutside: false,
@@ -201,10 +174,9 @@ const FirstStep: FC = (props) => {
           ),
           size: '80%',
         });
-      } catch (e: any) {
+      } catch (error) {
         toaster.show(
-          e?.message ||
-            t('generation_failed', 'Failed to generate posts, please try again.'),
+          error instanceof Error ? error.message : fallbackMessage,
           'warning'
         );
       } finally {
@@ -212,7 +184,7 @@ const FirstStep: FC = (props) => {
         setLoading(false);
       }
     },
-    [integrations, reloadCalendarView, fetch, generateStep, modal, toaster, t]
+    [fetch, generateStep, integrations, modal, reloadCalendarView, t, toaster]
   );
   return (
     <form

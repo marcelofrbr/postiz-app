@@ -1,12 +1,19 @@
 import { IUploadProvider, UploadedStream } from './upload.interface';
-import { createWriteStream, mkdirSync, unlink, writeFileSync } from 'fs';
+import { constants, createWriteStream, mkdirSync, writeFileSync } from 'fs';
+import { access, mkdir, unlink } from 'fs/promises';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { isSafePublicHttpsUrl } from '@gitroom/nestjs-libraries/dtos/webhooks/webhook.url.validator';
 import { ssrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { parseDataUrl } from '@gitroom/nestjs-libraries/upload/data.url';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { fileTypeFromBuffer } = require('file-type');
+import {
+  extractUploadPathSegments,
+  resolveSafeUploadFile,
+} from './safe.upload.path';
+// file-type is ESM-only, so it is loaded on first use instead of at import time
+const fileTypeFromBuffer = (buffer: Buffer): Promise<any> =>
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  require('file-type').fileTypeFromBuffer(buffer);
 
 const LOCAL_STORAGE_ALLOWED_MIME = new Set<string>([
   'image/jpeg',
@@ -24,6 +31,17 @@ const LOCAL_STORAGE_ALLOWED_MIME = new Set<string>([
 ]);
 export class LocalStorage implements IUploadProvider {
   constructor(private uploadDirectory: string) {}
+
+  async healthCheck(): Promise<void> {
+    if (!this.uploadDirectory) {
+      throw new Error('UPLOAD_DIRECTORY nao configurado');
+    }
+    // fs assíncrono: a sonda roda numa rota de rede, não pode bloquear o event
+    // loop num UPLOAD_DIRECTORY lento/NFS. Garante o diretório e confirma que é
+    // gravável, sem escrever arquivo.
+    await mkdir(this.uploadDirectory, { recursive: true });
+    await access(this.uploadDirectory, constants.W_OK);
+  }
 
   // Files live under /YYYY/MM/DD with a random name; creates the folder
   private newFilePath(ext: string) {
@@ -121,7 +139,7 @@ export class LocalStorage implements IUploadProvider {
         await pipeline(stream, createWriteStream(filePath));
       } catch (err) {
         // Don't leave a truncated file behind (size cap hit, remote closed, ...)
-        await this.removeFile(filePath).catch(() => {});
+        await unlink(filePath).catch(() => {});
         throw err;
       }
 
@@ -137,21 +155,29 @@ export class LocalStorage implements IUploadProvider {
     }
   }
 
-  // Accepts either the public URL or the filesystem path
-  async removeFile(filePath: string): Promise<void> {
-    const publicPrefix = process.env.FRONTEND_URL + '/uploads';
-    const localPath = filePath.startsWith(publicPrefix)
-      ? this.uploadDirectory + filePath.slice(publicPrefix.length)
-      : filePath;
-    // Logic to remove the file from the filesystem goes here
-    return new Promise((resolve, reject) => {
-      unlink(localPath, (err) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
+  async removeFile(publicPath: string): Promise<void> {
+    // `publicPath` e o valor gravado em Media.path/Media.thumbnail — URL
+    // publica da rota /uploads, nao caminho de disco. Reusamos o mesmo
+    // resolvedor da rota de leitura para nao aceitar `..`/symlink saindo de
+    // UPLOAD_DIRECTORY: um id de midia forjado nunca vira `unlink` arbitrario.
+    const segments = extractUploadPathSegments(publicPath);
+    if (!segments.length) {
+      return;
+    }
+
+    const filePath = resolveSafeUploadFile(this.uploadDirectory, segments);
+    if (!filePath) {
+      // Arquivo ja removido (ou fora do diretorio): nada a fazer.
+      return;
+    }
+
+    try {
+      await unlink(filePath);
+    } catch (err) {
+      // Idempotente: corrida entre duas remocoes nao e falha.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
   }
 }

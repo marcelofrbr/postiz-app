@@ -12,10 +12,12 @@ import React, {
 import {
   CopilotChat,
   CopilotKitCSSProperties,
+  ErrorMessageProps,
   InputProps,
   UserMessageProps,
 } from '@copilotkit/react-ui';
 import { Input } from '@gitroom/frontend/components/agents/agent.input';
+import { useToaster } from '@gitroom/react/toaster/toaster';
 import { useModals } from '@gitroom/frontend/components/layout/new-modal';
 import {
   CopilotKit,
@@ -33,6 +35,7 @@ import {
   Message as CopilotMessage,
   TextMessage,
 } from '@copilotkit/runtime-client-gql';
+import { sanitizeChatContent } from '@gitroom/helpers/utils/sanitize.chat.content';
 import { AddEditModal } from '@gitroom/frontend/components/new-launch/add.edit.modal';
 import dayjs from 'dayjs';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -40,11 +43,107 @@ import { ExistingDataContextProvider } from '@gitroom/frontend/components/launch
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 
+// Classifica a mensagem crua de erro do streaming do agente (CopilotKit
+// nao expoe status HTTP — o erro chega como texto). Espelha o mapeamento
+// do backend `buildFriendlyProviderMessage` em ai-text.service.ts.
+// Remove material sensivel (Bearer tokens, chaves sk-...) que o provedor
+// possa ecoar na mensagem crua do stream, antes de exibir o "Detalhe".
+// Espelha `sanitize()` de ai-text.service.ts / ai-video.service.ts.
+const sanitize = (value: string): string =>
+  (value || '')
+    .replace(/Bearer\s+[A-Za-z0-9_.\-]+/gi, 'Bearer ***')
+    .replace(/\bsk-[A-Za-z0-9_.\-]{6,}/gi, 'sk-***');
+
+type AiErrorKind = 'config' | 'credits' | 'auth' | 'rate_limit' | 'generic';
+
+const classifyAiError = (raw?: string): AiErrorKind => {
+  const lower = (raw || '').toLowerCase();
+  // Credencial nao configurada / nao compartilhada (HTTP 412 do
+  // AiProviderResolverService). Verificado ANTES de auth para nao ser
+  // confundido com erro de chave invalida.
+  if (
+    /modelos de ia|configure suas chaves|nao esta compartilhando|não está compartilhando|precondition|412/.test(
+      lower
+    )
+  ) {
+    return 'config';
+  }
+  if (
+    /credit|insufficient|afford|quota|billing|payment|fund|saldo|402/.test(
+      lower
+    )
+  ) {
+    return 'credits';
+  }
+  if (/unauthor|api key|invalid.{0,12}key|authentication|forbidden|401|403/.test(lower)) {
+    return 'auth';
+  }
+  if (/rate.?limit|too many|429/.test(lower)) {
+    return 'rate_limit';
+  }
+  return 'generic';
+};
+
+const friendlyAiErrorMessage = (
+  raw: string | undefined,
+  t: ReturnType<typeof useT>
+): string => {
+  switch (classifyAiError(raw)) {
+    case 'config':
+      return t(
+        'ai_assistant_provider_not_configured',
+        'Configure suas chaves de IA em Configurações > Modelos de IA. Se você usa um perfil secundário, verifique se o perfil padrão está compartilhando a credencial.'
+      );
+    case 'credits':
+      return t(
+        'ai_provider_no_credits',
+        'Seu provedor de IA está sem créditos ou atingiu o limite de cobrança. Verifique o saldo na conta do provedor e tente novamente.'
+      );
+    case 'auth':
+      return t(
+        'ai_provider_auth_error',
+        'Falha de autenticação no provedor de IA. Confira a chave de API em Configurações > Modelos de IA.'
+      );
+    case 'rate_limit':
+      return t(
+        'ai_provider_rate_limit',
+        'O provedor de IA atingiu o limite de requisições. Aguarde alguns instantes e tente novamente.'
+      );
+    default:
+      return t(
+        'ai_assistant_generic_error',
+        'O assistente encontrou um erro ao responder. Tente novamente em instantes.'
+      );
+  }
+};
+
+// Renderizado pelo CopilotChat quando o streaming do agente falha (ex.:
+// provedor de IA sem creditos). Sem isso o usuario nao recebia feedback
+// nenhum — o erro so aparecia no console (runChatCompletion).
+const AgentErrorMessage: FC<ErrorMessageProps> = ({ error }) => {
+  const t = useT();
+  const raw = error?.message || '';
+  return (
+    <div className="copilotKitMessage copilotKitAssistantMessage !bg-red-500/10 border border-red-500/40 rounded-[8px] p-[12px] my-[8px] text-[14px]">
+      <div className="font-semibold text-red-400 mb-[4px]">
+        {t('ai_assistant_error_title', 'Não foi possível responder')}
+      </div>
+      <div className="opacity-90">{friendlyAiErrorMessage(raw, t)}</div>
+      {raw ? (
+        <div className="text-[11px] opacity-50 mt-[8px] break-words">
+          {t('detail_label', 'Detalhe')}: {sanitize(raw)}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 export const AgentChat: FC = () => {
   const { backendUrl } = useVariables();
   const params = useParams<{ id: string }>();
   const { properties } = useContext(PropertiesContext);
   const t = useT();
+  const toaster = useToaster();
 
   return (
     <CopilotKit
@@ -74,6 +173,7 @@ export const AgentChat: FC = () => {
             className="w-full h-full"
             labels={{
               title: t('your_assistant', 'Your Assistant'),
+              placeholder: t('agent_input_placeholder', 'Type a message...'),
               initial: t('agent_welcome_message', `Hello, I am your Postiz agent 🙌🏻.
               
 I can schedule a post or multiple posts to multiple channels and generate pictures and videos.
@@ -87,6 +187,16 @@ You can also use me as an MCP Server, check Settings >> Agents
             }}
             UserMessage={Message}
             Input={NewInput}
+            ErrorMessage={AgentErrorMessage}
+            onError={(errorEvent) =>
+              toaster.show(
+                friendlyAiErrorMessage(
+                  (errorEvent?.error as { message?: string })?.message,
+                  t
+                ),
+                'warning'
+              )
+            }
           />
         </div>
       </div>
@@ -162,7 +272,7 @@ const Message: FC<UserMessageProps> = (props) => {
         ? content
         : content.map((p) => (p.type === 'text' ? p.text : '')).join('');
 
-    return text
+    const html = text
       .replace(/Video: (http.*mp4\n)/g, (match, p1) => {
         return `<video controls class="h-[150px] w-[150px] rounded-[8px] mb-[10px]"><source src="${p1.trim()}" type="video/mp4">Your browser does not support the video tag.</video>`;
       })
@@ -178,11 +288,14 @@ const Message: FC<UserMessageProps> = (props) => {
           return ``;
         }
       );
+    return sanitizeChatContent(html);
   }, [props.message?.content]);
   return (
     <div
       className="copilotKitMessage copilotKitUserMessage min-w-[300px]"
-      dangerouslySetInnerHTML={{ __html: convertContentToImagesAndVideo }}
+      dangerouslySetInnerHTML={{
+        __html: convertContentToImagesAndVideo,
+      }}
     />
   );
 };
@@ -326,12 +439,19 @@ const OpenModal: FC<{
   const { properties } = useContext(PropertiesContext);
   const startModal = useCallback(async () => {
     for (const integration of args.list) {
+      const foundIntegration = properties.find(
+        (p) => p.id === integration.integrationId
+      );
+      if (!foundIntegration) {
+        continue;
+      }
       await new Promise((res) => {
         const group = makeId(10);
         modals.openModal({
           id: 'add-edit-modal',
           closeOnClickOutside: false,
           removeLayout: true,
+          fullScreen: true,
           closeOnEscape: false,
           withCloseButton: false,
           askClose: true,
@@ -345,9 +465,7 @@ const OpenModal: FC<{
               value={{
                 group,
                 integration: integration.integrationId,
-                integrationPicture:
-                  properties.find((p) => p.id === integration.integrationId)
-                    ?.picture || '',
+                integrationPicture: foundIntegration.picture || '',
                 settings: integration.settings || {},
                 posts: integration.posts.map((p) => ({
                   approvedSubmitForOrder: 'NO',
@@ -358,9 +476,7 @@ const OpenModal: FC<{
                   settings: JSON.stringify(integration.settings || {}),
                   group,
                   integrationId: integration.integrationId,
-                  integration: properties.find(
-                    (p) => p.id === integration.integrationId
-                  ),
+                  integration: foundIntegration,
                   publishDate: dayjs.utc(integration.date).toISOString(),
                   image: p.attachments.map((a) => ({
                     id: a.id,
@@ -372,9 +488,7 @@ const OpenModal: FC<{
               <AddEditModal
                 date={dayjs.utc(integration.date)}
                 allIntegrations={properties}
-                integrations={properties.filter(
-                  (p) => p.id === integration.integrationId
-                )}
+                integrations={[foundIntegration]}
                 onlyValues={integration.posts.map((p) => ({
                   content: p.content,
                   id: makeId(10),

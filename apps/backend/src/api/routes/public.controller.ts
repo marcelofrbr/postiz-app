@@ -28,18 +28,39 @@ import { OnlyURL } from '@gitroom/nestjs-libraries/dtos/webhooks/webhooks.dto';
 import { isSafePublicHttpsUrl } from '@gitroom/nestjs-libraries/dtos/webhooks/webhook.url.validator';
 import { ssrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { CreatePublicCommentDto } from '@gitroom/nestjs-libraries/dtos/comments/add.comment.dto';
+import { ReviewLinksService } from '@gitroom/nestjs-libraries/database/prisma/review-links/review-links.service';
+import { CommentKind } from '@prisma/client';
+import { buildAgentSkillMarkdown } from '@gitroom/nestjs-libraries/agent/agent.skill.template';
+import { SkipProfileAccess } from '@gitroom/nestjs-libraries/services/auth/profile-access/profile-access.decorators';
 
 const pump = promisify(pipeline);
 
 @ApiTags('Public')
+@SkipProfileAccess()
 @Controller('/public')
 export class PublicController {
   constructor(
     private _trackService: TrackService,
     private _agentGraphInsertService: AgentGraphInsertService,
     private _postsService: PostsService,
-    private _subscriptionService: SubscriptionService
+    private _subscriptionService: SubscriptionService,
+    private _reviewLinksService: ReviewLinksService
   ) {}
+
+  // Guia/skill de agente em markdown, com a URL do backend já injetada.
+  // Público (sem auth) — o conteúdo é instrução, não segredo; as chamadas reais
+  // exigem a chave. Passe este link + a chave ao agente (Hermes/OpenClaw/etc.).
+  @Get('/agent-skill')
+  async agentSkill(@Res() res: Response) {
+    const apiUrl =
+      process.env.NEXT_PUBLIC_BACKEND_URL ||
+      process.env.FRONTEND_URL ||
+      '';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(buildAgentSkillMarkdown(apiUrl));
+  }
+
   @Post('/agent')
   async createAgent(@Body() body: { text: string; apiKey: string }) {
     if (
@@ -86,6 +107,79 @@ export class PublicController {
     @RealIP() ip: string
   ) {
     return this._postsService.createPublicComment(postId, body, null, ip);
+  }
+
+  @Get(`/posts/:id/review`)
+  async getReviewLinkInfo(
+    @Param('id') postId: string,
+    @Query('token') token?: string
+  ) {
+    const link = await this._reviewLinksService.resolveToken(postId, token);
+    if (!link) {
+      // Do not leak token validity differences
+      return { valid: false };
+    }
+    return {
+      valid: true,
+      allowComment: link.allowComment,
+      allowApprove: link.allowApprove,
+      expiresAt: link.expiresAt,
+    };
+  }
+
+  @Post(`/posts/:id/review/comment`)
+  async guestReviewComment(
+    @Param('id') postId: string,
+    @RealIP() ip: string,
+    @UserAgent() userAgent: string,
+    @Body()
+    body: {
+      token?: string;
+      guestName?: string;
+      guestEmail?: string;
+      content?: string;
+    }
+  ) {
+    return this._reviewLinksService.submitGuestAction({
+      postId,
+      rawToken: body?.token,
+      ip: ip || null,
+      userAgent: userAgent || null,
+      guestName: body?.guestName,
+      guestEmail: body?.guestEmail,
+      content: body?.content,
+      kind: CommentKind.COMMENT,
+    });
+  }
+
+  @Post(`/posts/:id/review/approve`)
+  async guestReviewApprove(
+    @Param('id') postId: string,
+    @RealIP() ip: string,
+    @UserAgent() userAgent: string,
+    @Body()
+    body: {
+      token?: string;
+      guestName?: string;
+      guestEmail?: string;
+      decision?: 'APPROVED' | 'CHANGE_REQUESTED';
+      note?: string;
+    }
+  ) {
+    const kind =
+      body?.decision === 'CHANGE_REQUESTED'
+        ? CommentKind.CHANGE_REQUEST
+        : CommentKind.APPROVAL;
+    return this._reviewLinksService.submitGuestAction({
+      postId,
+      rawToken: body?.token,
+      ip: ip || null,
+      userAgent: userAgent || null,
+      guestName: body?.guestName,
+      guestEmail: body?.guestEmail,
+      content: body?.note,
+      kind,
+    });
   }
 
   @Post('/t')

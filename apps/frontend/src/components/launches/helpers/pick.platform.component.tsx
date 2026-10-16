@@ -4,6 +4,7 @@ import { useMoveToIntegrationListener } from '@gitroom/frontend/components/launc
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import clsx from 'clsx';
 import SafeImage from '@gitroom/react/helpers/safe.image';
+import { PlatformIconBadge } from '@gitroom/frontend/components/launches/helpers/platform-icon.helper';
 import { useCopilotAction, useCopilotReadable } from '@copilotkit/react-core';
 import { useStateCallback } from '@gitroom/react/helpers/use.state.callback';
 import { timer } from '@gitroom/helpers/utils/timer';
@@ -251,21 +252,11 @@ export const PickPlatforms: FC<{
                           width={32}
                           height={32}
                         />
-                        {integration.identifier === 'youtube' ? (
-                          <img
-                            src="/icons/platforms/youtube.svg"
-                            className="absolute z-10 bottom-0 -end-[5px]"
-                            width={20}
-                          />
-                        ) : (
-                          <SafeImage
-                            src={`/icons/platforms/${integration.identifier}.png`}
-                            className="rounded-full absolute z-10 -bottom-[5px] -end-[5px] border border-fifth"
-                            alt={integration.identifier}
-                            width={20}
-                            height={20}
-                          />
-                        )}
+                        <PlatformIconBadge
+                          identifier={integration.identifier}
+                          size={20}
+                          className="rounded-full absolute z-10 -bottom-[5px] -end-[5px] border border-fifth"
+                        />
                       </div>
                     </div>
                   ) : (
@@ -290,12 +281,10 @@ export const PickPlatforms: FC<{
                               width={24}
                               height={24}
                             />
-                            <SafeImage
-                              src={`/icons/platforms/${integration.identifier}.png`}
+                            <PlatformIconBadge
+                              identifier={integration.identifier}
+                              size={15}
                               className="rounded-full absolute z-10 -bottom-[5px] -end-[5px] border border-fifth"
-                              alt={integration.identifier}
-                              width={15}
-                              height={15}
                             />
                           </div>
                           <div>

@@ -3,6 +3,7 @@
 import { useState, useCallback } from 'react';
 import { useSWRConfig } from 'swr';
 import { useUser } from '../layout/user.context';
+import { useCurrentProfile } from '@gitroom/frontend/hooks/use-current-profile.hook';
 import copy from 'copy-to-clipboard';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
@@ -82,12 +83,17 @@ export const isChatOnlyMcpClient = (
   client: string
 ): client is ChatOnlyMcpClient => client in chatOnlyMcpClients;
 
-export const getMcpConfig = (
+const getMcpConfigRaw = (
   client: AnyMcpClient,
   auth: McpAuth,
   mcpBase: string,
   apiKey: string
-): { config: string; hint: string } => {
+): {
+  config: string;
+  hint?: string;
+  hintKey?: string;
+  hintDefault?: string;
+} => {
   if (isChatOnlyMcpClient(client)) {
     return {
       config: chatOnlyMcpClients[client],
@@ -176,71 +182,43 @@ export const getMcpConfig = (
     case 'Claude Code':
       return {
         config: `claude mcp add --transport http postiz ${urlBase} --header "Authorization: ${bearer}"`,
-        hint: 'Run this command in your terminal.',
+        hintKey: 'mcp_hint_terminal',
+        hintDefault: 'Run this command in your terminal.',
       };
     case 'Cursor':
       return {
-        config: json({
-          mcpServers: {
-            postiz: { url: urlBase, headers: { Authorization: bearer } },
-          },
-        }),
-        hint: 'Add to .cursor/mcp.json in your project root.',
+        config: json({ mcpServers: { postiz: { url: urlBase, headers: { Authorization: bearer } } } }),
+        hintKey: 'mcp_hint_cursor', hintDefault: 'Add to .cursor/mcp.json in your project root.',
       };
     case 'VS Code / Copilot':
       return {
-        config: json({
-          servers: {
-            postiz: {
-              type: 'http',
-              url: urlBase,
-              headers: { Authorization: bearer },
-            },
-          },
-        }),
-        hint: 'Add to .vscode/mcp.json in your project root.',
+        config: json({ servers: { postiz: { type: 'http', url: urlBase, headers: { Authorization: bearer } } } }),
+        hintKey: 'mcp_hint_vscode', hintDefault: 'Add to .vscode/mcp.json in your project root.',
       };
     case 'Windsurf':
       return {
-        config: json({
-          mcpServers: {
-            postiz: {
-              serverUrl: urlBase,
-              headers: { Authorization: bearer },
-            },
-          },
-        }),
-        hint: 'Add to ~/.codeium/windsurf/mcp_config.json',
+        config: json({ mcpServers: { postiz: { serverUrl: urlBase, headers: { Authorization: bearer } } } }),
+        hintKey: 'mcp_hint_windsurf', hintDefault: 'Add to ~/.codeium/windsurf/mcp_config.json',
       };
     case 'Amp':
       return {
-        config: json({
-          'amp.mcpServers': {
-            postiz: { url: urlBase, headers: { Authorization: bearer } },
-          },
-        }),
-        hint: 'Add to your Amp settings.json',
+        config: json({ 'amp.mcpServers': { postiz: { url: urlBase, headers: { Authorization: bearer } } } }),
+        hintKey: 'mcp_hint_amp', hintDefault: 'Add to your Amp settings.json',
       };
     case 'Codex':
       return {
         config: `# ~/.codex/config.toml\n\n[mcp_servers.postiz]\nurl = "${urlBase}"\nhttp_headers = { "Authorization" = "${bearer}" }`,
-        hint: 'Add to ~/.codex/config.toml',
+        hintKey: 'mcp_hint_codex', hintDefault: 'Add to ~/.codex/config.toml',
       };
     case 'Gemini CLI':
       return {
-        config: json({
-          mcpServers: {
-            postiz: { url: urlBase, headers: { Authorization: bearer } },
-          },
-        }),
-        hint: 'Add to ~/.gemini/settings.json',
+        config: json({ mcpServers: { postiz: { url: urlBase, headers: { Authorization: bearer } } } }),
+        hintKey: 'mcp_hint_gemini', hintDefault: 'Add to ~/.gemini/settings.json',
       };
     case 'Warp':
       return {
-        config: json({
-          postiz: { url: urlBase, headers: { Authorization: bearer } },
-        }),
-        hint: 'Settings > MCP Servers > + Add, then paste this config.',
+        config: json({ postiz: { url: urlBase, headers: { Authorization: bearer } } }),
+        hintKey: 'mcp_hint_warp', hintDefault: 'Settings > MCP Servers > + Add, then paste this config.',
       };
     case 'Hermes':
       return {
@@ -269,6 +247,18 @@ export const getMcpConfig = (
         hint: 'Run this in your terminal, replace <group-id> with the agent group that should get Postiz.',
       };
   }
+};
+
+export const getMcpConfig = (
+  ...args: Parameters<typeof getMcpConfigRaw>
+): {
+  config: string;
+  hint: string;
+  hintKey?: string;
+  hintDefault?: string;
+} => {
+  const { config, hint, hintKey, hintDefault } = getMcpConfigRaw(...args);
+  return { config, hint: hint ?? hintDefault ?? '', hintKey, hintDefault };
 };
 
 export const CopyButton = ({
@@ -306,11 +296,42 @@ export const CopyButton = ({
   );
 };
 
+const ExternalLinkIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+    <polyline points="15 3 21 3 21 9" />
+    <line x1="10" y1="14" x2="21" y2="3" />
+  </svg>
+);
+
+const DocsLinkButton = ({
+  href,
+  label,
+  tooltip,
+}: {
+  href: string;
+  label: string;
+  tooltip?: string;
+}) => (
+  <a
+    className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
+    href={href}
+    target="_blank"
+    rel="noopener noreferrer"
+    {...(tooltip
+      ? { 'data-tooltip-id': 'tooltip', 'data-tooltip-content': tooltip }
+      : {})}
+  >
+    <ExternalLinkIcon />
+    {label}
+  </a>
+);
+
 const McpSection = ({
-  user,
+  apiKey,
   mcpBase,
 }: {
-  user: { publicApi: string };
+  apiKey: string;
   mcpBase: string;
 }) => {
   const t = useT();
@@ -325,12 +346,13 @@ const McpSection = ({
   const auth: McpAuth = tab === 'apikey' ? 'apikey' : 'oauth';
   const [revealed, setRevealed] = useState(false);
 
-  const { config, hint } = getMcpConfig(
-    activeClient,
-    auth,
-    mcpBase,
-    user.publicApi
-  );
+  const {
+    config,
+    hint: rawHint,
+    hintKey,
+    hintDefault,
+  } = getMcpConfig(activeClient, auth, mcpBase, apiKey);
+  const hint = hintKey ? t(hintKey, hintDefault ?? rawHint) : rawHint;
 
   const baseUrl = auth === 'oauth' ? getMcpOauthUrl(mcpBase) : `${mcpBase}/mcp`;
 
@@ -340,8 +362,8 @@ const McpSection = ({
     revealed || auth === 'oauth' || chatOnly
       ? config
       : config.replace(
-          new RegExp(user.publicApi.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
-          '*'.repeat(user.publicApi.length)
+          new RegExp(apiKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+          '*'.repeat(apiKey.length)
         );
 
   return (
@@ -379,14 +401,10 @@ const McpSection = ({
               </a>
             </>
           )}
-          <a
-            className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
+          <DocsLinkButton
             href="https://docs.postiz.com/mcp/introduction"
-            target="_blank"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-            {t('read_the_docs', 'Docs')}
-          </a>
+            label={t('read_the_docs', 'Docs')}
+          />
         </div>
       </div>
       <div className="p-[20px] mobile:p-[14px] flex flex-col gap-[16px]">
@@ -602,6 +620,12 @@ const ciCliSteps = [
   },
 ] as const;
 
+const cliStepKeys: Record<string, string> = {
+  'Install the CLI': 'cli_step_install',
+  'Set your API key as an environment variable': 'cli_step_set_key',
+  'Install the Postiz skill for your AI agent': 'cli_step_install_skill',
+};
+
 const CliSection = ({ apiKey }: { apiKey: string }) => {
   const t = useT();
   const [mode, setMode] = useState<'local' | 'ci'>('local');
@@ -674,7 +698,10 @@ const CliSection = ({ apiKey }: { apiKey: string }) => {
         {displaySteps.map((step, i) => (
           <div key={i} className="flex flex-col gap-[6px]">
             <div className="text-[13px] font-[600] text-customColor18">
-              {i + 1}. {step.label}
+              {i + 1}.{' '}
+              {cliStepKeys[step.label]
+                ? t(cliStepKeys[step.label], step.label)
+                : step.label}
             </div>
             <pre className="bg-newBgColorInner border border-newBorder rounded-[8px] p-[16px] text-[13px] whitespace-pre-wrap break-all overflow-x-auto leading-[1.6]">
               {step.code}
@@ -724,17 +751,224 @@ const CliSection = ({ apiKey }: { apiKey: string }) => {
   );
 };
 
+const RevealEyeIcon = ({ revealed }: { revealed: boolean }) => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    {revealed ? (
+      <>
+        <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
+        <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
+        <line x1="1" y1="1" x2="23" y2="23" />
+      </>
+    ) : (
+      <>
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+        <circle cx="12" cy="12" r="3" />
+      </>
+    )}
+  </svg>
+);
+
+const RotateIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21.5 2v6h-6" />
+    <path d="M21.34 15.57a10 10 0 11-.57-8.38L21.5 8" />
+  </svg>
+);
+
+const ApiKeyCard = ({
+  title,
+  description,
+  apiKey,
+  reveal,
+  onReveal,
+  onRotate,
+  extraActions,
+  docsUrl,
+}: {
+  title: string;
+  description: string;
+  apiKey: string;
+  reveal: boolean;
+  onReveal: () => void;
+  onRotate: () => void;
+  extraActions?: React.ReactNode;
+  docsUrl?: string;
+}) => {
+  const t = useT();
+  return (
+    <div className="bg-newBgColorInnerInner rounded-[12px] border border-newBorder overflow-hidden">
+      <div className="bg-newBgColorInner px-[20px] mobile:px-[14px] py-[14px] border-b border-newBorder flex items-start justify-between gap-[12px] mobile:flex-col">
+        <div>
+          <div className="text-[15px] font-[600]">{title}</div>
+          <div className="text-[13px] text-customColor18 mt-[2px]">{description}</div>
+        </div>
+        {docsUrl && (
+          <div className="flex gap-[6px] shrink-0 pt-[2px]">
+            <DocsLinkButton
+              href={docsUrl}
+              label={t('read_the_docs', 'Docs')}
+              tooltip={t('api_reference_tooltip', 'Documentação da API (Swagger)')}
+            />
+          </div>
+        )}
+      </div>
+      <div className="p-[20px] mobile:p-[14px] flex flex-col gap-[16px]">
+        <div className="bg-newBgColorInner border border-newBorder rounded-[8px] px-[16px] h-[44px] flex items-center overflow-hidden">
+          <code className="text-[14px] flex-1 truncate">
+            {reveal ? (
+              apiKey
+            ) : (
+              <span className="flex items-center">
+                <span className="blur-sm select-none">{apiKey.slice(0, -5)}</span>
+                <span>{apiKey.slice(-5)}</span>
+              </span>
+            )}
+          </code>
+        </div>
+        <div className="flex flex-wrap gap-[8px]">
+          <button type="button" onClick={onReveal} className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]">
+            <RevealEyeIcon revealed={reveal} />
+            {reveal ? t('hide', 'Hide') : t('reveal', 'Reveal')}
+          </button>
+          <CopyButton text={apiKey} label={t('copy', 'Copy')} />
+          <button type="button" onClick={onRotate} className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]">
+            <RotateIcon />
+            {t('rotate_key', 'Rotate Key')}
+          </button>
+          {extraActions}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ProfileApiKeySection = ({ profileId }: { profileId: string }) => {
+  const user = useUser();
+  const fetch = useFetch();
+  const toaster = useToaster();
+  const decision = useDecisionModal();
+  const { mutate } = useSWRConfig();
+  const { backendUrl } = useVariables();
+  const t = useT();
+  const [reveal, setReveal] = useState(false);
+
+  const docsUrl = `${backendUrl}/docs`;
+
+  const generateKey = useCallback(async () => {
+    await fetch(`/profiles/${profileId}/api-key/rotate`, { method: 'POST' });
+    await mutate('/user/self');
+    toaster.show(t('profile_api_key_generated', 'Profile API Key generated'), 'success');
+  }, [fetch, mutate, profileId, t, toaster]);
+
+  const rotateKey = useCallback(async () => {
+    const approved = await decision.open({
+      title: t('rotate_profile_api_key', 'Rotate Profile API Key?'),
+      description: t('rotate_profile_api_key_description', 'The old key will stop working immediately.'),
+      approveLabel: t('rotate', 'Rotate'),
+      cancelLabel: t('cancel', 'Cancel'),
+    });
+    if (!approved) return;
+    await fetch(`/profiles/${profileId}/api-key/rotate`, { method: 'POST' });
+    await mutate('/user/self');
+    setReveal(false);
+    toaster.show(t('profile_api_key_rotated', 'Profile API Key rotated'), 'success');
+  }, [decision, fetch, mutate, profileId, t, toaster]);
+
+  if (!user) return null;
+
+  if (!user.profileApiKey) {
+    return (
+      <div className="bg-newBgColorInnerInner rounded-[12px] border border-newBorder overflow-hidden">
+        <div className="bg-newBgColorInner px-[20px] mobile:px-[14px] py-[14px] border-b border-newBorder flex items-start justify-between gap-[12px] mobile:flex-col">
+          <div>
+            <div className="text-[15px] font-[600]">{t('profile_api_key', 'Profile API Key')}</div>
+            <div className="text-[13px] text-customColor18 mt-[2px]">{t('profile_api_key_description', 'Scoped access to this profile only.')}</div>
+          </div>
+          <div className="flex gap-[6px] shrink-0 pt-[2px]">
+            <DocsLinkButton
+              href={docsUrl}
+              label={t('read_the_docs', 'Docs')}
+              tooltip={t('api_reference_tooltip', 'Documentação da API (Swagger)')}
+            />
+          </div>
+        </div>
+        <div className="p-[20px]">
+          <button type="button" onClick={generateKey} className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]">
+            {t('generate_profile_api_key', 'Generate Key')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ApiKeyCard
+      title={t('profile_api_key', 'Profile API Key')}
+      description={t('profile_api_key_description', 'Scoped access to this profile only.')}
+      apiKey={user.profileApiKey}
+      reveal={reveal}
+      onReveal={() => setReveal(!reveal)}
+      onRotate={rotateKey}
+      docsUrl={docsUrl}
+    />
+  );
+};
+
+const AgentSkillSection = ({ backendUrl }: { backendUrl: string }) => {
+  const t = useT();
+  const skillUrl = `${backendUrl}/public/agent-skill`;
+  return (
+    <div className="bg-newBgColorInnerInner rounded-[12px] border border-newBorder overflow-hidden">
+      <div className="bg-newBgColorInner px-[20px] mobile:px-[14px] py-[14px] border-b border-newBorder flex items-start justify-between gap-[12px] mobile:flex-col">
+        <div>
+          <div className="text-[15px] font-[600]">
+            {t('agent_skill', 'Skill para Agentes de IA')}
+          </div>
+          <div className="text-[13px] text-customColor18 mt-[2px]">
+            {t(
+              'agent_skill_description',
+              'Guia completo (MCP + CLI + API) para o agente. Passe este link + sua Chave de API ao agente (Hermes, OpenClaw, Claude, etc.).'
+            )}
+          </div>
+        </div>
+        <div className="flex gap-[6px] shrink-0 pt-[2px]">
+          <a
+            className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
+            href={skillUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+            {t('open', 'Abrir')}
+          </a>
+        </div>
+      </div>
+      <div className="p-[20px] mobile:p-[14px] flex flex-col gap-[16px]">
+        <div className="bg-newBgColorInner border border-newBorder rounded-[8px] px-[16px] h-[44px] flex items-center overflow-hidden">
+          <code className="text-[14px] flex-1 truncate">{skillUrl}</code>
+        </div>
+        <div className="flex flex-wrap gap-[8px]">
+          <CopyButton text={skillUrl} label={t('copy_skill_link', 'Copiar link da skill')} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PublicApiContent = () => {
   const user = useUser();
+  const { profile } = useCurrentProfile();
   const { backendUrl, frontEndUrl, mcpUrl } = useVariables();
   const toaster = useToaster();
   const fetch = useFetch();
   const decision = useDecisionModal();
   const { mutate } = useSWRConfig();
-  const [reveal, setReveal] = useState(false);
   const t = useT();
+  const [revealOrg, setRevealOrg] = useState(false);
 
-  const rotateKey = useCallback(async () => {
+  const isDefault = profile?.isDefault ?? true;
+
+  const rotateOrgKey = useCallback(async () => {
     const approved = await decision.open({
       title: t('rotate_api_key', 'Rotate API Key?'),
       description: t(
@@ -747,11 +981,8 @@ const PublicApiContent = () => {
     if (!approved) return;
     await fetch('/user/api-key/rotate', { method: 'POST' });
     await mutate('/user/self');
-    setReveal(false);
-    toaster.show(
-      t('api_key_rotated', 'API Key rotated successfully'),
-      'success'
-    );
+    setRevealOrg(false);
+    toaster.show(t('api_key_rotated', 'API Key rotated successfully'), 'success');
   }, [decision, fetch, mutate, toaster]);
 
   if (!user || !user.publicApi) {
@@ -759,164 +990,61 @@ const PublicApiContent = () => {
   }
 
   const mcpBase = mcpUrl || backendUrl;
+  const docsUrl = `${backendUrl}/docs`;
+  const activeKey = isDefault ? user.publicApi : (user.profileApiKey ?? user.publicApi);
+
+  const wizardButton = (
+    <button
+      type="button"
+      data-tooltip-id="tooltip"
+      data-tooltip-content={t(
+        'payload_wizard_description',
+        'Building a POST request to /posts can be complex. Use the wizard to schedule a post with the UI, then copy the generated payload.'
+      )}
+      onClick={() => window.open(`${frontEndUrl}/modal/dark/all`, '_blank')}
+      className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+        <polyline points="15 3 21 3 21 9" />
+        <line x1="10" y1="14" x2="21" y2="3" />
+      </svg>
+      {t('open_wizard', 'Open Wizard')}
+    </button>
+  );
 
   return (
     <div className="flex flex-col gap-[40px]">
       <div className="text-[14px] text-textColor leading-[1.7]">
-        {t(
-          'api_auth_note_line1',
-          'Use your API Key to automate your own account.'
-        )}
+        {t('api_auth_note_line1', 'Use your API Key to automate your own account.')}
         <br />
-        {t(
-          'api_auth_note_line2',
-          'If you are building a product that schedules posts on behalf of other Postiz users,'
-        )}
+        {t('api_auth_note_line2', 'If you are building a product that schedules posts on behalf of other Postiz users,')}
         <br />
-        {t(
-          'api_auth_note_line3',
-          'create an OAuth App under the "Apps" tab. Your users will authorize your app via OAuth2,'
-        )}
+        {t('api_auth_note_line3', 'create an OAuth App under the "Apps" tab. Your users will authorize your app via OAuth2,')}
         <br />
-        {t(
-          'api_auth_note_line4',
-          'and you will receive a pos_ prefixed token that works with the API, MCP, and CLI — just like an API Key.'
-        )}
-      </div>
-      <div className="bg-newBgColorInnerInner rounded-[12px] border border-newBorder overflow-hidden">
-        <div className="bg-newBgColorInner px-[20px] mobile:px-[14px] py-[14px] border-b border-newBorder flex items-start justify-between gap-[12px] mobile:flex-col">
-          <div>
-            <div className="text-[15px] font-[600]">
-              {t('api_key', 'API Key')}
-            </div>
-            <div className="text-[13px] text-customColor18 mt-[2px]">
-              {t(
-                'use_postiz_api_to_integrate_with_your_tools',
-                'Use Postiz API to integrate with your tools.'
-              )}
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-[6px] shrink-0 pt-[2px]">
-            <a
-              className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
-              href="https://docs.postiz.com/public-api"
-              target="_blank"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-            {t('read_the_docs', 'Docs')}
-            </a>
-            <a
-              className="cursor-pointer px-[16px] h-[36px] bg-[#612BD3] hover:bg-[#5520CB] text-white transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
-              href="https://www.npmjs.com/package/n8n-nodes-postiz"
-              target="_blank"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-              {t('n8n_node', 'N8N Node')}
-            </a>
-          </div>
-        </div>
-        <div className="p-[20px] mobile:p-[14px] flex flex-col gap-[16px]">
-          <div className="bg-newBgColorInner border border-newBorder rounded-[8px] px-[16px] h-[44px] flex items-center overflow-hidden">
-            <code className="text-[14px] flex-1 truncate">
-              {reveal ? (
-                user.publicApi
-              ) : (
-                <span className="flex items-center">
-                  <span className="blur-sm select-none">
-                    {user.publicApi.slice(0, -5)}
-                  </span>
-                  <span>{user.publicApi.slice(-5)}</span>
-                </span>
-              )}
-            </code>
-          </div>
-          <div className="flex flex-wrap gap-[8px]">
-            <button
-              type="button"
-              onClick={() => setReveal(!reveal)}
-              className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                {reveal ? (
-                  <>
-                    <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
-                    <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
-                    <line x1="1" y1="1" x2="23" y2="23" />
-                  </>
-                ) : (
-                  <>
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </>
-                )}
-              </svg>
-              {reveal ? t('hide', 'Hide') : t('reveal', 'Reveal')}
-            </button>
-            <CopyButton text={user.publicApi} label={t('copy', 'Copy')} />
-            <button
-              type="button"
-              onClick={rotateKey}
-              className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M21.5 2v6h-6" />
-                <path d="M21.34 15.57a10 10 0 11-.57-8.38L21.5 8" />
-              </svg>
-              {t('rotate_key', 'Rotate Key')}
-            </button>
-            <button
-              type="button"
-              data-tooltip-id="tooltip"
-              data-tooltip-content={t(
-                'payload_wizard_description',
-                'Building a POST request to /posts can be complex. Use the wizard to schedule a post with the UI, then copy the generated payload.'
-              )}
-              onClick={() =>
-                window.open(`${frontEndUrl}/modal/dark/all`, '_blank')
-              }
-              className="cursor-pointer px-[16px] h-[36px] bg-btnSimple hover:bg-boxHover transition-colors rounded-[8px] text-[13px] font-[600] flex items-center gap-[6px]"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
-              {t('open_wizard', 'Open Wizard')}
-            </button>
-          </div>
-        </div>
+        {t('api_auth_note_line4', 'and you will receive a pos_ prefixed token that works with the API, MCP, and CLI — just like an API Key.')}
       </div>
 
-      <CliSection apiKey={user.publicApi} />
+      {isDefault && (
+        <ApiKeyCard
+          title={t('org_api_key', 'Organization API Key')}
+          description={t('org_api_key_description', 'Full access to all profiles.')}
+          apiKey={user.publicApi}
+          reveal={revealOrg}
+          onReveal={() => setRevealOrg(!revealOrg)}
+          onRotate={rotateOrgKey}
+          extraActions={wizardButton}
+          docsUrl={docsUrl}
+        />
+      )}
 
-      <McpSection user={user} mcpBase={mcpBase} />
+      {user.profileId && (
+        <ProfileApiKeySection profileId={user.profileId} />
+      )}
+
+      <AgentSkillSection backendUrl={backendUrl} />
+      <CliSection apiKey={activeKey} />
+      <McpSection apiKey={activeKey} mcpBase={mcpBase} />
     </div>
   );
 };
@@ -926,7 +1054,9 @@ export const PublicComponent = () => {
 
   return (
     <div className="flex flex-col gap-[20px]">
-      <h3 className="text-[20px]">{t('agents', 'Agents')}</h3>
+      <h3 className="text-[20px]">
+        {t('integrations_menu', 'Integrations')}
+      </h3>
       <PublicApiContent />
     </div>
   );

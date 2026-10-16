@@ -10,9 +10,14 @@
     "build": "next build",
     "build:sentry": "dotenv -e ../../.env -- next build",
     "start": "dotenv -e ../../.env -- next start -p 4200",
-    "pm2": "pm2 start pnpm --name frontend -- start"
+    "pm2": "pm2 start pnpm --name frontend --max-memory-restart ${PM2_FRONTEND_MAX_MEMORY:-1G} --max-restarts 10 --restart-delay 5000 -- start"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@blueprintjs/core": "6.10.0",
+    "@blueprintjs/icons": "6.8.0",
+    "@xyflow/react": "^12.10.2"
+  }
 }

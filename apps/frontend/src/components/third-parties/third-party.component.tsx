@@ -115,7 +115,9 @@ export const ThirdPartyComponent = () => {
       {!isLoading && (
         <div className="bg-sixth border-fifth border rounded-[4px] p-[24px]">
           {!data?.length ? (
-            <div className="text-customColor18">No Integrations Yet</div>
+            <div className="text-customColor18">
+              {t('no_integrations_yet', 'No Integrations Yet')}
+            </div>
           ) : (
             <div className="flex flex-col gap-[16px]">
               {data?.map((p: any) => (

@@ -3,6 +3,7 @@ import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/databa
 import { ApiModule } from '@gitroom/backend/api/api.module';
 import { APP_GUARD } from '@nestjs/core';
 import { PoliciesGuard } from '@gitroom/backend/services/auth/permissions/permissions.guard';
+import { ProfileAccessGuard } from '@gitroom/nestjs-libraries/services/auth/profile-access/profile-access.guard';
 import { PublicApiModule } from '@gitroom/backend/public-api/public.api.module';
 import { ThrottlerBehindProxyGuard } from '@gitroom/nestjs-libraries/throttler/throttler.provider';
 import { ThrottlerModule } from '@nestjs/throttler';
@@ -15,6 +16,7 @@ import { ChatModule } from '@gitroom/nestjs-libraries/chat/chat.module';
 import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { TemporalRegisterMissingSearchAttributesModule } from '@gitroom/nestjs-libraries/temporal/temporal.register';
 import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/temporal/infinite.workflow.register';
+import { ProfileSeedModule } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.seed.module';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
@@ -32,6 +34,7 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
     getTemporalModule(false),
     TemporalRegisterMissingSearchAttributesModule,
     InfiniteWorkflowRegisterModule,
+    ProfileSeedModule,
     ThrottlerModule.forRoot({
       throttlers: [
         {
@@ -52,6 +55,10 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
     {
       provide: APP_GUARD,
       useClass: PoliciesGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: ProfileAccessGuard,
     },
   ],
   exports: [

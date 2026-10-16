@@ -74,15 +74,16 @@ export class AutopostService {
     }
   }
 
-  getAutoposts(orgId: string) {
-    return this._autopostsRepository.getAutoposts(orgId);
+  getAutoposts(orgId: string, profileId?: string) {
+    return this._autopostsRepository.getAutoposts(orgId, profileId);
   }
 
-  async createAutopost(orgId: string, body: AutopostDto, id?: string) {
+  async createAutopost(orgId: string, body: AutopostDto, id?: string, profileId?: string) {
     const data = await this._autopostsRepository.createAutopost(
       orgId,
       body,
-      id
+      id,
+      profileId
     );
 
     await this.processCron(body.active, orgId, data.id);
@@ -90,11 +91,12 @@ export class AutopostService {
     return data;
   }
 
-  async changeActive(orgId: string, id: string, active: boolean) {
+  async changeActive(orgId: string, id: string, active: boolean, profileId?: string) {
     const data = await this._autopostsRepository.changeActive(
       orgId,
       id,
-      active
+      active,
+      profileId
     );
     await this.processCron(active, orgId, id);
     return data;
@@ -131,8 +133,8 @@ export class AutopostService {
     }
   }
 
-  async deleteAutopost(orgId: string, id: string) {
-    const data = await this._autopostsRepository.deleteAutopost(orgId, id);
+  async deleteAutopost(orgId: string, id: string, profileId?: string) {
+    const data = await this._autopostsRepository.deleteAutopost(orgId, id, profileId);
     await this.processCron(false, orgId, id);
     return data;
   }
@@ -327,7 +329,8 @@ export class AutopostService {
     }
 
     const integrations = await this._integrationService.getIntegrationsList(
-      getPost.organizationId
+      getPost.organizationId,
+      getPost.profileId || undefined
     );
 
     const parseIntegrations = JSON.parse(getPost.integrations || '[]') || [];

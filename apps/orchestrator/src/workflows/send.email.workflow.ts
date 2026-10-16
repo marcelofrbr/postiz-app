@@ -33,7 +33,13 @@ const { sendEmail: sendBulkEmail } = proxyActivities<EmailActivity>({
 // One workflow per email, the Resend rate limit is enforced on the email task queues
 export async function sendSingleEmailWorkflow(email: SendEmail) {
   const send = email.addTo === 'top' ? sendPriorityEmail : sendBulkEmail;
-  await send(email.to, email.subject, email.html, email.replyTo);
+  await send(
+    email.to,
+    email.subject,
+    email.html,
+    email.replyTo,
+    email.lang
+  );
 }
 
 const RATE_LIMIT_MS = 700;
@@ -66,7 +72,13 @@ export async function sendEmailWorkflow({
       if (!email) {
         continue;
       }
-      await sendEmail(email.to, email.subject, email.html, email.replyTo);
+      await sendEmail(
+        email.to,
+        email.subject,
+        email.html,
+        email.replyTo,
+        email.lang
+      );
       processedThisRun++;
     } catch (err) {
       console.log(err);

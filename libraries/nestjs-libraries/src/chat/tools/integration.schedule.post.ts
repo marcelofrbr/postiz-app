@@ -12,6 +12,7 @@ import {
   ValidUrlExtension,
   ValidUrlPath,
 } from '@gitroom/helpers/utils/valid.url.path';
+import { readRequestContext } from '@gitroom/nestjs-libraries/chat/tools/tool.context.helper';
 
 const validUrlExtension = new ValidUrlExtension();
 const validUrlPath = new ValidUrlPath();
@@ -26,6 +27,28 @@ const attachmentUrl = z
   .refine((url) => validUrlExtension.validate(url, {} as any), {
     message: validUrlExtension.defaultMessage({} as any),
   });
+
+// Settings values chegam do agent sempre como string (schema compatibility com
+// Gemini). Tentamos reidratar via JSON.parse — se for "true", "42", "[...]",
+// "{...}" volta o tipo nativo. Strings cruas ("video-id-xyz") nao sao JSON
+// validas e ficam intactas. Numeros como "42" sao parseaveis e voltam number.
+function tryParseJson(value: string): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (
+    trimmed === '' ||
+    (!/^[\[{]/.test(trimmed) &&
+      !/^(true|false|null)$/i.test(trimmed) &&
+      !/^-?\d/.test(trimmed))
+  ) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
 
 @Injectable()
 export class IntegrationSchedulePostTool implements AgentToolInterface {
@@ -109,9 +132,9 @@ If validation fails, the result contains output.errors describing what to fix; t
                       .string()
                       .describe('Name of the settings key to pass'),
                     value: z
-                      .any()
+                      .string()
                       .describe(
-                        'Value of the key, always prefer the id then label if possible. When the settings schema says a field is an id, pass the id returned by the channel tools, never the display label'
+                        'Value of the key as a string. For complex values (objects, arrays, numbers, booleans) send a JSON-stringified representation — the backend will JSON.parse it transparently. For simple ids/labels, send the raw string. Always prefer the id then label if possible. When the settings schema says a field is an id, pass the id returned by the channel tools, never the display label.'
                       ),
                   })
                 )
@@ -137,27 +160,38 @@ If validation fails, the result contains output.errors describing what to fix; t
           )
           .or(z.object({ errors: z.string() })),
       }),
-      execute: async (inputData, context) => {
-        checkAuth(inputData, context);
+      execute: async (input: any, options: any) => {
+        checkAuth(input, options);
+        const requestContext = readRequestContext(options);
         const organizationId = JSON.parse(
-          (context?.requestContext as any)?.get('organization') as string
+          requestContext.get('organization') as string
         ).id;
+        const profileId =
+          (requestContext.get('profileId') as string) || undefined;
         const finalOutput = [];
 
         const integrations = {} as Record<string, Integration>;
-        for (const platform of inputData.socialPost) {
+        for (const platform of input.socialPost) {
           integrations[platform.integrationId] =
             await this._integrationService.getIntegrationById(
               organizationId,
               platform.integrationId
             );
 
+          if (
+            profileId &&
+            integrations[platform.integrationId]?.profileId &&
+            integrations[platform.integrationId].profileId !== profileId
+          ) {
+            throw new Error('Integration does not belong to the active profile');
+          }
+
           // Same server-side validation as the dashboard / public API
           // (settings DTO + media checkValidity + empty / too-long content).
           const settings = platform.settings.reduce(
             (acc: AllProvidersSettings, s: { key: string; value: any }) => ({
               ...acc,
-              [s.key]: s.value,
+              [s.key]: tryParseJson(s.value),
             }),
             {} as AllProvidersSettings
           );
@@ -215,7 +249,7 @@ If validation fails, the result contains output.errors describing what to fix; t
           }
         }
 
-        for (const post of inputData.socialPost) {
+        for (const post of input.socialPost) {
           const integration = integrations[post.integrationId];
 
           if (!integration) {
@@ -232,9 +266,12 @@ If validation fails, the result contains output.errors describing what to fix; t
                 integration,
                 group: makeId(10),
                 settings: post.settings.reduce(
-                  (acc: AllProvidersSettings, s: { key: string; value: any }) => ({
+                  (acc: any, s: any) => ({
                     ...acc,
-                    [s.key]: s.value,
+                    // Schema declara value como string (compatibilidade Gemini);
+                    // tentamos JSON.parse para reidratar arrays/objects/numbers/booleans.
+                    // Falha de parse → mantemos como string crua.
+                    [s.key]: tryParseJson(s.value),
                   }),
                   {
                     __type: integration.providerIdentifier,
@@ -251,7 +288,7 @@ If validation fails, the result contains output.errors describing what to fix; t
                 })),
               },
             ],
-          }, 'MCP');
+          }, 'MCP', false, profileId);
           // Same public preview page the calendar "Preview Post" button opens.
           finalOutput.push(
             ...output.map((p) => ({

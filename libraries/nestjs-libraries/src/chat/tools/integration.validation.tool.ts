@@ -23,15 +23,6 @@ export class IntegrationValidationTool implements AgentToolInterface {
          And use the triggerTool function.
          'tools' can also include a mention lookup, use it to tag people or pages in the post content.
         `,
-      mcp: {
-        annotations: {
-          title: 'Get Integration Schema',
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: false,
-        },
-      },
       inputSchema: z.object({
         isPremium: z
           .boolean()
@@ -82,10 +73,10 @@ export class IntegrationValidationTool implements AgentToolInterface {
             ),
         }),
       }),
-      execute: async (inputData, context) => {
-        checkAuth(inputData, context);
+      execute: async (input: any, options: any) => {
+        checkAuth(input, options);
         const integration = socialIntegrationList.find(
-          (p) => p.identifier === inputData.platform
+          (p) => p.identifier === input.platform
         )!;
 
         if (!integration) {
@@ -94,7 +85,7 @@ export class IntegrationValidationTool implements AgentToolInterface {
           };
         }
 
-        const maxLength = integration.maxLength(inputData.isPremium);
+        const maxLength = integration.maxLength(input.isPremium);
         const schemas = !integration.dto
           ? false
           : getValidationSchemas()[integration.dto.name];

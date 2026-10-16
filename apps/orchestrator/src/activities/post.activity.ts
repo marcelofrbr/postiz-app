@@ -6,13 +6,18 @@ import {
 } from 'nestjs-temporal-core';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import {
+  NotificationPayload,
   NotificationService,
   NotificationType,
 } from '@gitroom/nestjs-libraries/database/prisma/notifications/notification.service';
 import { Integration, Post, State } from '@prisma/client';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
-import { AuthTokenDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import {
+  AuthTokenDetails,
+  PendingCheckResponse,
+  PostResponse,
+} from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
@@ -24,10 +29,15 @@ import {
   postId as postIdSearchParam,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
+import { FlowsService } from '@gitroom/nestjs-libraries/database/prisma/flows/flows.service';
+import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.service';
+import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 import {
   setHeartbeatDetails,
   withHeartbeat,
 } from '@gitroom/nestjs-libraries/temporal/temporal.heartbeat';
+import { assertSafePendingData } from '@gitroom/nestjs-libraries/temporal/pending-post-state';
+import { selectPostWorkflowVersion } from '@gitroom/nestjs-libraries/temporal/post-workflow-version';
 import {
   BadBody,
   Disconnect,
@@ -104,7 +114,9 @@ export class PostActivity {
     private _refreshIntegrationService: RefreshIntegrationService,
     private _webhookService: WebhooksService,
     private _temporalService: TemporalService,
-    private _subscriptionService: SubscriptionService
+    private _subscriptionService: SubscriptionService,
+    private _flowsService: FlowsService,
+    private _encryption: EncryptionService
   ) {}
 
   @ActivityMethod()
@@ -116,9 +128,13 @@ export class PostActivity {
   async searchForMissingThreeHoursPosts() {
     const list = await this._postService.searchForMissingThreeHoursPosts();
     for (const post of list) {
+      const workflowName = selectPostWorkflowVersion({
+        integrationId: post.integration.id,
+        providerIdentifier: post.integration.providerIdentifier,
+      });
       await this._temporalService.client
         .getRawClient()
-        .workflow.signalWithStart('postWorkflowV112', {
+        .workflow.signalWithStart(workflowName, {
           workflowId: `post_${post.id}`,
           taskQueue: 'main',
           signal: 'poke',
@@ -126,9 +142,11 @@ export class PostActivity {
           signalArgs: [],
           args: [
             {
-              taskQueue: post.integration.providerIdentifier
-                .split('-')[0]
-                .toLowerCase(),
+              taskQueue: post.integration.providerIdentifier.startsWith('zernio-')
+                ? 'main'
+                : post.integration.providerIdentifier
+                    .split('-')[0]
+                    .toLowerCase(),
               postId: post.id,
               organizationId: post.organizationId,
             },
@@ -150,6 +168,29 @@ export class PostActivity {
   @ActivityMethod()
   async updatePost(id: string, postId: string, releaseURL: string) {
     await this._postService.updatePost(id, postId, releaseURL);
+
+    // Bind any pending "next_publication" flows to this freshly published
+    // media. Stories are excluded. Failures must never break the publish.
+    try {
+      if (!postId) return;
+      const post = await this._postService.getPostById(id);
+      if (!post || post.integration?.providerIdentifier !== 'instagram') {
+        return;
+      }
+      let settings: any = {};
+      try {
+        settings = JSON.parse(post.settings || '{}');
+      } catch {
+        settings = {};
+      }
+      if (settings?.post_type === 'story') return;
+      await this._flowsService.bindPendingFlowsToPost(
+        post.integrationId,
+        postId
+      );
+    } catch {
+      // ignore: bind errors must not fail the post publish
+    }
   }
 
   @ActivityMethod()
@@ -196,6 +237,56 @@ export class PostActivity {
     return [reanchorInterval(root), ...comments];
   }
 
+  // The V113 reads return the post without the integration credentials, only
+  // the ids and flags the workflow needs. Mutating activities reload and
+  // decrypt the integration on their own.
+  @ActivityMethod()
+  async getPostV113(orgId: string, postId: string) {
+    if (process.env.STRIPE_SECRET_KEY) {
+      const subscription = await this._subscriptionService.getSubscription(
+        orgId
+      );
+      if (!subscription) {
+        return false;
+      }
+    }
+
+    const [post] = await this._postService.getPostsRecursively(
+      postId,
+      true,
+      orgId,
+      true
+    );
+    return post ? this.sanitizePostForWorkflow(reanchorInterval(post)) : false;
+  }
+
+  @ActivityMethod()
+  async getPostsListV113(orgId: string, postId: string) {
+    if (process.env.STRIPE_SECRET_KEY) {
+      const subscription = await this._subscriptionService.getSubscription(
+        orgId
+      );
+      if (!subscription) {
+        return [];
+      }
+    }
+
+    const getPosts = await this._postService.getPostsRecursively(
+      postId,
+      true,
+      orgId,
+      true
+    );
+    if (!getPosts || getPosts.length === 0 || getPosts[0].parentPostId) {
+      return [];
+    }
+
+    const [root, ...comments] = getPosts.map((post) =>
+      this.sanitizePostForWorkflow(post)
+    );
+    return [reanchorInterval(root), ...comments];
+  }
+
   @ActivityMethod()
   async isCommentable(integration: Integration) {
     const getIntegration = this._integrationManager.getSocialIntegration(
@@ -203,6 +294,13 @@ export class PostActivity {
     );
 
     return !!getIntegration.comment;
+  }
+
+  @ActivityMethod()
+  async isCommentableForWorkflow(providerIdentifier: string) {
+    const provider =
+      this._integrationManager.getSocialIntegration(providerIdentifier);
+    return !!provider.comment;
   }
 
   @ActivityMethod()
@@ -218,43 +316,60 @@ export class PostActivity {
     // dropped once all V108 executions have drained
     return withHeartbeat(() =>
       this.handleDisconnect(integration, async () => {
+        const runtimeIntegration = this.withDecryptedToken(integration);
         const getIntegration = this._integrationManager.getSocialIntegration(
-          integration.providerIdentifier
+          runtimeIntegration.providerIdentifier
         );
 
         const newPosts = await this._postService.updateTags(
-          integration.organizationId,
+          runtimeIntegration.organizationId,
           posts
         );
 
         return getIntegration.comment(
-          integration.internalId,
+          runtimeIntegration.internalId,
           postId,
           lastPostId,
-          integration.token,
-          await Promise.all(
-            (newPosts || []).map(async (p) => ({
-              id: p.id,
-              message: stripHtmlValidation(
-                getIntegration.editor,
-                p.content,
-                true,
-                false,
-                !/<\/?[a-z][\s\S]*>/i.test(p.content),
-                getIntegration.mentionFormat
-              ),
-              settings: JSON.parse(p.settings || '{}'),
-              media: await this._postService.updateMedia(
-                p.id,
-                JSON.parse(p.image || '[]'),
-                getIntegration?.convertToJPEG || false
-              ),
-            }))
-          ),
-          integration
+          runtimeIntegration.token,
+          await this.mapPosts(getIntegration, newPosts || []),
+          runtimeIntegration
         );
       })
     );
+  }
+
+  @ActivityMethod()
+  async postCommentV113(
+    postId: string,
+    lastPostId: string | undefined,
+    organizationId: string,
+    integrationId: string,
+    posts: Post[]
+  ) {
+    return withHeartbeat(async () => {
+      const runtimeIntegration = await this.loadRuntimeIntegration(
+        organizationId,
+        integrationId
+      );
+      const provider = this._integrationManager.getSocialIntegration(
+        runtimeIntegration.providerIdentifier
+      );
+
+      setHeartbeatDetails(`${runtimeIntegration.providerIdentifier}: comment`);
+      const newPosts = await this._postService.updateTags(
+        runtimeIntegration.organizationId,
+        posts
+      );
+
+      return provider.comment(
+        runtimeIntegration.internalId,
+        postId,
+        lastPostId,
+        runtimeIntegration.token,
+        await this.mapPosts(provider, newPosts || []),
+        runtimeIntegration
+      );
+    });
   }
 
   @ActivityMethod()
@@ -269,6 +384,66 @@ export class PostActivity {
   @ActivityMethod()
   async postSocialPending(integration: Integration, posts: Post[]) {
     return this.postSocialInternal(integration, posts, true);
+  }
+
+  // Used by postWorkflowV113: same pending contract as postSocialPending, but
+  // the integration is loaded and decrypted here instead of crossing the
+  // workflow boundary, and pendingData is checked before it reaches history.
+  @ActivityMethod()
+  async postSocialPendingV113(
+    organizationId: string,
+    integrationId: string,
+    posts: Post[]
+  ): Promise<PostResponse[]> {
+    return withHeartbeat(async () => {
+      const runtimeIntegration = await this.loadRuntimeIntegration(
+        organizationId,
+        integrationId
+      );
+      const getIntegration = this._integrationManager.getSocialIntegration(
+        runtimeIntegration.providerIdentifier
+      );
+
+      setHeartbeatDetails('update tags');
+      const newPosts = await this._postService.updateTags(
+        runtimeIntegration.organizationId,
+        posts
+      );
+      setHeartbeatDetails('resolve media');
+      const mappedPosts = await this.mapPosts(getIntegration, newPosts || []);
+      setHeartbeatDetails(`${runtimeIntegration.providerIdentifier}: publish`);
+
+      const response = getIntegration.postPending
+        ? await getIntegration.postPending(
+            runtimeIntegration.internalId,
+            runtimeIntegration.token,
+            mappedPosts,
+            runtimeIntegration
+          )
+        : await getIntegration.post(
+            runtimeIntegration.internalId,
+            runtimeIntegration.token,
+            mappedPosts,
+            runtimeIntegration
+          );
+
+      const validated = response.map((item) =>
+        item.status === 'pending'
+          ? { ...item, pendingData: assertSafePendingData(item.pendingData) }
+          : item
+      );
+
+      setHeartbeatDetails(
+        `${runtimeIntegration.providerIdentifier}: published, streak`
+      );
+      try {
+        await this.startStreak(runtimeIntegration.organizationId);
+      } catch {
+        // A notification/telemetry failure after publishing must not repeat it.
+      }
+
+      return validated;
+    });
   }
 
   // A Disconnect error means the platform will keep rejecting this channel no
@@ -349,6 +524,8 @@ export class PostActivity {
     posts: Post[],
     allowPending: boolean
   ) {
+    integration = this.withDecryptedToken(integration);
+
     // Stage markers: whatever ran last is what a timed-out activity reports.
     // Providers that go through this.fetch overwrite these with the exact URL;
     // the ones on their own HTTP client (x, youtube, bluesky) are still
@@ -416,21 +593,7 @@ export class PostActivity {
     // failing the activity here would retry it and publish again.
     setHeartbeatDetails(`${integration.providerIdentifier}: published, streak`);
     try {
-      await this._temporalService.client
-        .getRawClient()
-        .workflow.start('streakWorkflowV2', {
-          args: [{ organizationId: integration.organizationId }],
-          workflowId: `streak_${integration.organizationId}`,
-          taskQueue: 'main',
-          // Keep a running streak, it checks for newer posts before it ends
-          workflowIdConflictPolicy: 'USE_EXISTING',
-          typedSearchAttributes: new TypedSearchAttributes([
-            {
-              key: organizationId,
-              value: integration.organizationId,
-            },
-          ]),
-        });
+      await this.startStreak(integration.organizationId);
     } catch (err) {
       /**empty**/
     }
@@ -438,43 +601,238 @@ export class PostActivity {
     return postNow;
   }
 
-  @ActivityMethod()
-  async checkPostStatus(integration: Integration, pendingData: any) {
-    const getIntegration = this._integrationManager.getSocialIntegration(
-      integration.providerIdentifier
-    );
+  private withDecryptedToken(integration: Integration): Integration {
+    return {
+      ...integration,
+      token: decryptIntegrationToken(this._encryption, integration.token),
+    };
+  }
 
-    return this.handleDisconnect(integration, () =>
-      getIntegration.checkPostStatus(integration.token, pendingData, integration)
+  private async loadRuntimeIntegration(
+    organizationId: string,
+    integrationId: string
+  ): Promise<Integration> {
+    return this.withDecryptedToken(
+      await this.loadIntegration(organizationId, integrationId)
     );
   }
 
+  private async loadIntegration(
+    organizationId: string,
+    integrationId: string
+  ): Promise<Integration> {
+    const integration = await this._integrationService.getIntegrationById(
+      organizationId,
+      integrationId
+    );
+    if (!integration) {
+      throw new Error('Integration not found');
+    }
+    return integration;
+  }
+
+  private sanitizePostForWorkflow(post: any) {
+    const safePost: any = { ...post };
+    delete safePost.error;
+    delete safePost.childrenPost;
+    if (!post.integration) {
+      return safePost;
+    }
+    const integration = post.integration;
+    return {
+      ...safePost,
+      integration: {
+        id: integration.id,
+        organizationId: integration.organizationId,
+        profileId: integration.profileId,
+        providerIdentifier: integration.providerIdentifier,
+        name: integration.name,
+        disabled: integration.disabled,
+        refreshNeeded: integration.refreshNeeded,
+      },
+    };
+  }
+
+  private mapPosts(getIntegration: any, posts: Post[]) {
+    return Promise.all(
+      posts.map(async (post) => ({
+        id: post.id,
+        message: stripHtmlValidation(
+          getIntegration.editor,
+          post.content,
+          true,
+          false,
+          !/<\/?[a-z][\s\S]*>/i.test(post.content),
+          getIntegration.mentionFormat
+        ),
+        settings: JSON.parse(post.settings || '{}'),
+        media: await this._postService.updateMedia(
+          post.id,
+          JSON.parse(post.image || '[]'),
+          getIntegration?.convertToJPEG || false
+        ),
+      }))
+    );
+  }
+
+  private validatePendingCheckResponse(
+    response: PendingCheckResponse
+  ): PendingCheckResponse {
+    return response.status === 'completed'
+      ? response
+      : {
+          ...response,
+          pendingData: assertSafePendingData(response.pendingData),
+        };
+  }
+
+  private startStreak(organizationIdValue: string) {
+    return this._temporalService.client
+      .getRawClient()
+      .workflow.start('streakWorkflowV2', {
+        args: [{ organizationId: organizationIdValue }],
+        workflowId: `streak_${organizationIdValue}`,
+        taskQueue: 'main',
+        // Keep a running streak, it checks for newer posts before it ends
+        workflowIdConflictPolicy: 'USE_EXISTING',
+        typedSearchAttributes: new TypedSearchAttributes([
+          {
+            key: organizationId,
+            value: organizationIdValue,
+          },
+        ]),
+      });
+  }
+
   @ActivityMethod()
-  async finalizePost(integration: Integration, pendingData: any) {
+  async checkPostStatus(integration: Integration, pendingData: any) {
+    const runtimeIntegration = this.withDecryptedToken(integration);
     const getIntegration = this._integrationManager.getSocialIntegration(
-      integration.providerIdentifier
+      runtimeIntegration.providerIdentifier
     );
 
-    return withHeartbeat(() =>
-      this.handleDisconnect(integration, () =>
-        getIntegration.finalizePost(integration.token, pendingData, integration)
+    return this.handleDisconnect(integration, () =>
+      getIntegration.checkPostStatus(
+        runtimeIntegration.token,
+        pendingData,
+        runtimeIntegration
       )
     );
   }
 
   @ActivityMethod()
+  async finalizePost(integration: Integration, pendingData: any) {
+    const runtimeIntegration = this.withDecryptedToken(integration);
+    const getIntegration = this._integrationManager.getSocialIntegration(
+      runtimeIntegration.providerIdentifier
+    );
+
+    return withHeartbeat(() =>
+      this.handleDisconnect(integration, () =>
+        getIntegration.finalizePost(
+          runtimeIntegration.token,
+          pendingData,
+          runtimeIntegration
+        )
+      )
+    );
+  }
+
+  @ActivityMethod()
+  async checkPostStatusV113(
+    organizationId: string,
+    integrationId: string,
+    pendingData: unknown
+  ): Promise<PendingCheckResponse> {
+    const runtimeIntegration = await this.loadRuntimeIntegration(
+      organizationId,
+      integrationId
+    );
+    const provider = this._integrationManager.getSocialIntegration(
+      runtimeIntegration.providerIdentifier
+    );
+    if (!provider.checkPostStatus) {
+      throw new Error('Provider does not implement checkPostStatus');
+    }
+
+    const result = await provider.checkPostStatus(
+      runtimeIntegration.token,
+      assertSafePendingData(pendingData),
+      runtimeIntegration
+    );
+    return this.validatePendingCheckResponse(result);
+  }
+
+  @ActivityMethod()
+  async finalizePostV113(
+    organizationId: string,
+    integrationId: string,
+    pendingData: unknown
+  ): Promise<PendingCheckResponse> {
+    return withHeartbeat(async () => {
+      const runtimeIntegration = await this.loadRuntimeIntegration(
+        organizationId,
+        integrationId
+      );
+      const provider = this._integrationManager.getSocialIntegration(
+        runtimeIntegration.providerIdentifier
+      );
+      if (!provider.finalizePost) {
+        throw new Error('Provider does not implement finalizePost');
+      }
+
+      setHeartbeatDetails(`${runtimeIntegration.providerIdentifier}: finalize`);
+      const result = await provider.finalizePost(
+        runtimeIntegration.token,
+        assertSafePendingData(pendingData),
+        runtimeIntegration
+      );
+      return this.validatePendingCheckResponse(result);
+    });
+  }
+
+  // Accepts the i18n payload (key + params) used by the profile-aware
+  // workflows, and the legacy (subject, message) strings that the upstream
+  // workflow versions still send; their activity arguments are frozen. A
+  // legacy text goes through as its own key, which the catalog renders as is.
+  async inAppNotification(
+    orgId: string,
+    payload: NotificationPayload,
+    sendEmail?: boolean,
+    digest?: boolean,
+    type?: NotificationType
+  ): Promise<void>;
   async inAppNotification(
     orgId: string,
     subject: string,
     message: string,
-    sendEmail = false,
-    digest = false,
-    type: NotificationType = 'success'
-  ) {
+    sendEmail?: boolean,
+    digest?: boolean,
+    type?: NotificationType
+  ): Promise<void>;
+  @ActivityMethod()
+  async inAppNotification(
+    orgId: string,
+    payloadOrSubject: NotificationPayload | string,
+    ...rest: any[]
+  ): Promise<void> {
+    if (typeof payloadOrSubject === 'string') {
+      const [message, sendEmail = false, digest = false, type = 'success'] =
+        rest;
+      await this._notificationService.inAppNotification(
+        orgId,
+        { subjectKey: payloadOrSubject, messageKey: message },
+        sendEmail,
+        digest,
+        type
+      );
+      return;
+    }
+
+    const [sendEmail = false, digest = false, type = 'success'] = rest;
     await this._notificationService.inAppNotification(
       orgId,
-      subject,
-      message,
+      payloadOrSubject,
       sendEmail,
       digest,
       type
@@ -491,6 +849,13 @@ export class PostActivity {
   }
 
   @ActivityMethod()
+  async globalPlugsForWorkflow(organizationId: string, integrationId: string) {
+    return this.globalPlugs(
+      await this.loadIntegration(organizationId, integrationId)
+    );
+  }
+
+  @ActivityMethod()
   async changeState(id: string, state: State, err?: any, body?: any) {
     await this._postService.changeState(id, state, err, body);
   }
@@ -501,6 +866,18 @@ export class PostActivity {
       integration,
       integration.organizationId,
       integration.id,
+      settings
+    );
+  }
+
+  @ActivityMethod()
+  async internalPlugsForWorkflow(
+    organizationId: string,
+    integrationId: string,
+    settings: any
+  ) {
+    return this.internalPlugs(
+      await this.loadIntegration(organizationId, integrationId),
       settings
     );
   }
@@ -635,5 +1012,20 @@ export class PostActivity {
       );
       return false;
     }
+  }
+
+  @ActivityMethod()
+  async refreshTokenForWorkflow(
+    organizationId: string,
+    integrationId: string,
+    cause: string
+  ): Promise<boolean> {
+    let integration: Integration;
+    try {
+      integration = await this.loadIntegration(organizationId, integrationId);
+    } catch {
+      return false;
+    }
+    return !!(await this.refreshTokenWithCause(integration, cause));
   }
 }

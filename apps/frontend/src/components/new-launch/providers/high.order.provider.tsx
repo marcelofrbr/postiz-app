@@ -8,7 +8,12 @@ import React, {
   useImperativeHandle,
   useMemo,
 } from 'react';
-import { useForm, useWatch, FormProvider } from 'react-hook-form';
+import {
+  useForm,
+  useWatch,
+  FormProvider,
+  DefaultValues,
+} from 'react-hook-form';
 import { IsOptional } from 'class-validator';
 import { classValidatorResolver } from '@hookform/resolvers/class-validator';
 import { useLaunchStore } from '@gitroom/frontend/components/new-launch/store';
@@ -22,6 +27,7 @@ import { InternalChannels } from '@gitroom/frontend/components/launches/internal
 import { createPortal } from 'react-dom';
 import clsx from 'clsx';
 import SafeImage from '@gitroom/react/helpers/safe.image';
+import { getPlatformIconPath } from '@gitroom/frontend/components/launches/helpers/platform-icon.helper';
 
 class Empty {
   @IsOptional()
@@ -48,6 +54,21 @@ export const withProvider = function <T extends object>(params: {
     maximumCharacters?: number;
   }>;
   dto?: any;
+  // Valores padrao das settings do provider. Precisam ficar aqui (e nao em
+  // `register(name, { value })`) porque a prop `values` do useForm sobrescreve
+  // todo campo montado que nao esteja no objeto — ver o merge no useForm abaixo.
+  defaults?: DefaultValues<T>;
+  checkValidity?: (
+    value: Array<
+      Array<{
+        path: string;
+        thumbnail?: string;
+      }>
+    >,
+    settings: T,
+    additionalSettings: any,
+    t?: (key: string, defaultValue: string) => string
+  ) => Promise<string | true>;
   maximumCharacters?: number | ((settings: any) => number);
   inlineImages?: boolean | ((values: any) => boolean);
 }) {
@@ -56,6 +77,7 @@ export const withProvider = function <T extends object>(params: {
     SettingsComponent,
     CustomPreviewComponent,
     dto,
+    defaults,
     maximumCharacters,
   } = params;
 
@@ -174,8 +196,13 @@ export const withProvider = function <T extends object>(params: {
 
     const form = useForm({
       resolver: classValidatorResolver(dto || Empty),
+      // `defaultValues` cobre o post novo; o merge cobre editar/duplicar/set.
+      // As settings salvas sao espalhadas por ultimo e sempre vencem o default,
+      // entao nenhum post existente e reescrito — o default so preenche buraco
+      // (ex.: post Facebook salvo antes de `post_type` existir).
+      defaultValues: defaults,
       ...(Object.keys(selectedIntegration.settings).length > 0
-        ? { values: { ...selectedIntegration.settings } }
+        ? { values: { ...defaults, ...selectedIntegration.settings } }
         : {}),
       mode: 'all',
       criteriaMode: 'all',
@@ -329,7 +356,7 @@ export const withProvider = function <T extends object>(params: {
                           width={16}
                           height={16}
                           className="rounded-[16px] min-w-[16px] min-h-[16px] w-[16px] h-[16px] absolute bottom-0 end-0"
-                          src={`/icons/platforms/${selectedIntegration?.integration.identifier}.png`}
+                          src={getPlatformIconPath(selectedIntegration?.integration.identifier || '')}
                         />
                       </div>
                       <div className="text-[20px]">{selectedIntegration?.integration.name}</div>

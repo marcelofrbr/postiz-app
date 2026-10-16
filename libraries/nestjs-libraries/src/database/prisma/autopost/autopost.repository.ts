@@ -7,29 +7,34 @@ import { AutopostDto } from '@gitroom/nestjs-libraries/dtos/autopost/autopost.dt
 export class AutopostRepository {
   constructor(private _autoPost: PrismaRepository<'autoPost'>) {}
 
-  getTotal(orgId: string) {
+  getTotal(orgId: string, profileId?: string) {
     return this._autoPost.model.autoPost.count({
       where: {
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
         deletedAt: null,
+        OR: [{ profileId: null }, { profile: { deletedAt: null } }],
       },
     });
   }
 
-  getAutoposts(orgId: string) {
+  getAutoposts(orgId: string, profileId?: string) {
     return this._autoPost.model.autoPost.findMany({
       where: {
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
         deletedAt: null,
+        OR: [{ profileId: null }, { profile: { deletedAt: null } }],
       },
     });
   }
 
-  deleteAutopost(orgId: string, id: string) {
+  deleteAutopost(orgId: string, id: string, profileId?: string) {
     return this._autoPost.model.autoPost.update({
       where: {
         id,
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
       },
       data: {
         deletedAt: new Date(),
@@ -38,10 +43,16 @@ export class AutopostRepository {
   }
 
   getAutopost(id: string) {
-    return this._autoPost.model.autoPost.findUnique({
+    return this._autoPost.model.autoPost.findFirst({
       where: {
         id,
         deletedAt: null,
+        OR: [{ profileId: null }, { profile: { deletedAt: null } }],
+      },
+      include: {
+        profile: {
+          select: { id: true },
+        },
       },
     });
   }
@@ -57,11 +68,12 @@ export class AutopostRepository {
     });
   }
 
-  changeActive(orgId: string, id: string, active: boolean) {
+  changeActive(orgId: string, id: string, active: boolean, profileId?: string) {
     return this._autoPost.model.autoPost.update({
       where: {
         id,
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
       },
       data: {
         active,
@@ -69,7 +81,7 @@ export class AutopostRepository {
     });
   }
 
-  async createAutopost(orgId: string, body: AutopostDto, id?: string) {
+  async createAutopost(orgId: string, body: AutopostDto, id?: string, profileId?: string) {
     const { id: newId, active } = await this._autoPost.model.autoPost.upsert({
       where: {
         id: id || uuidv4(),
@@ -77,6 +89,7 @@ export class AutopostRepository {
       },
       create: {
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
         url: body.url,
         title: body.title,
         integrations: JSON.stringify(body.integrations),

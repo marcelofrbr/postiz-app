@@ -133,7 +133,7 @@ export const ContinueIntegration: FC<{
         navigateOrShow(
           `/launches?precondition=true`,
           returnURL,
-          'Precondition failed'
+          t('precondition_failed', 'Precondition failed')
         );
         return;
       }
@@ -194,8 +194,16 @@ export const ContinueIntegration: FC<{
         }
       }
 
-      // If it's a two-step provider, show the selection UI inline
+      // If it's a two-step provider, show the selection UI inline.
+      // Replace the URL to remove OAuth params (code/state) from the address
+      // bar so a page refresh during step-2 selection doesn't replay the
+      // already-consumed state and trigger "Invalid state".
       if (inBetweenSteps && !searchParams.refresh) {
+        window.history.replaceState(
+          {},
+          '',
+          `/integrations/social/${provider}?step=2`
+        );
         setTwoStepState({
           integrationId: id,
           onboarding,
@@ -206,11 +214,11 @@ export const ContinueIntegration: FC<{
       }
 
       navigateOrShow(
-        `/launches?added=${provider}&msg=Channel Updated${
+        `/launches?added=${provider}&msg=${t('channel_updated', 'Channel Updated')}${
           onboarding ? '&onboarding=true' : ''
         }`,
         returnURL,
-        'Channel Updated'
+        t('channel_updated', 'Channel Updated')
       );
     })();
   }, []);
@@ -238,18 +246,18 @@ export const ContinueIntegration: FC<{
         ) {
           const errorData = await response.json().catch(() => ({}));
           setErrorMessage(
-            errorData.message || 'Failed to save channel configuration'
+            errorData.message || t('failed_to_save_channel', 'Failed to save channel configuration')
           );
           setError(true);
           return;
         }
 
         navigateOrShow(
-          `/launches?added=${provider}&msg=Channel Added${
+          `/launches?added=${provider}&msg=${t('channel_added', 'Channel Added')}${
             twoStepState.onboarding ? '&onboarding=true' : ''
           }`,
           twoStepState.returnURL,
-          'Channel Added'
+          t('channel_added', 'Channel Added')
         );
       } finally {
         setIsSaving(false);
@@ -309,7 +317,8 @@ export const ContinueIntegration: FC<{
             {successState.message ||
               t(
                 'channel_connected_description',
-                `Your ${providerDisplayName} channel has been successfully connected. You can close this window now.`
+                'Your {{provider}} channel has been successfully connected. You can close this window now.',
+                { provider: providerDisplayName }
               )}
           </div>
         </div>
@@ -329,7 +338,7 @@ export const ContinueIntegration: FC<{
 
         {/* Content */}
         <div className="relative z-10 w-full max-w-[550px] mx-auto px-[20px]">
-          <div className="bg-[#1A1919] rounded-[16px] p-[32px] flex flex-col gap-[24px]">
+          <div className="bg-[#1A1919] rounded-[16px] p-[32px] flex flex-col gap-[24px] max-h-[80vh] overflow-hidden">
             <div className="flex flex-col gap-[8px] text-center">
               <h1 className="text-[24px] font-semibold">
                 {t('configure_your_channel', 'Configure Your Channel')}
@@ -337,7 +346,8 @@ export const ContinueIntegration: FC<{
               <p className="text-[14px] text-gray-400">
                 {t(
                   'select_the_page_or_account',
-                  `Select the ${providerDisplayName} page or account you want to connect.`
+                  'Select the {{provider}} page or account you want to connect.',
+                  { provider: providerDisplayName }
                 )}
               </p>
             </div>

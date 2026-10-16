@@ -1,5 +1,6 @@
 import {
   AuthTokenDetails,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -12,9 +13,9 @@ import {
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { InstagramDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/instagram.dto';
 import { InstagramProvider } from '@gitroom/nestjs-libraries/integrations/social/instagram.provider';
-import { META_GRAPH_API_VERSION } from '@gitroom/nestjs-libraries/integrations/social/facebook.provider';
 import { Integration } from '@prisma/client';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import { META_INSTAGRAM_GRAPH_URL } from '@gitroom/nestjs-libraries/integrations/social/meta-graph.constants';
 
 const instagramProvider = new InstagramProvider();
 
@@ -34,8 +35,9 @@ export class InstagramStandaloneProvider
     'instagram_business_content_publish',
     'instagram_business_manage_comments',
     'instagram_business_manage_insights',
+    'instagram_business_manage_messages',
   ];
-    override maxConcurrentJob = 200; // Instagram standalone has stricter limits
+  override maxConcurrentJob = 200; // Instagram standalone has stricter limits
   dto = InstagramDto;
 
   editor = 'normal' as const;
@@ -90,7 +92,7 @@ export class InstagramStandaloneProvider
       profile_picture_url = '',
     } = await (
       await fetch(
-        `https://graph.instagram.com/${META_GRAPH_API_VERSION}/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
+        `${META_INSTAGRAM_GRAPH_URL}/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
       )
     ).json();
 
@@ -105,13 +107,13 @@ export class InstagramStandaloneProvider
     };
   }
 
-  async generateAuthUrl() {
+  async generateAuthUrl(clientInformation?: ClientInformation) {
+    const clientId =
+      clientInformation?.client_id || process.env.INSTAGRAM_APP_ID;
     const state = makeSecureId(6);
     return {
       url:
-        `https://www.instagram.com/oauth/authorize?enable_fb_login=0&client_id=${
-          process.env.INSTAGRAM_APP_ID
-        }&redirect_uri=${encodeURIComponent(
+        `https://www.instagram.com/oauth/authorize?enable_fb_login=0&client_id=${clientId}&redirect_uri=${encodeURIComponent(
           `${
             process?.env.FRONTEND_URL?.indexOf('https') == -1
               ? `https://redirectmeto.com/${process?.env.FRONTEND_URL}`
@@ -125,14 +127,22 @@ export class InstagramStandaloneProvider
     };
   }
 
-  async authenticate(params: {
-    code: string;
-    codeVerifier: string;
-    refresh: string;
-  }) {
+  async authenticate(
+    params: {
+      code: string;
+      codeVerifier: string;
+      refresh: string;
+    },
+    clientInformation?: ClientInformation
+  ) {
+    const clientId =
+      clientInformation?.client_id || process.env.INSTAGRAM_APP_ID!;
+    const clientSecret =
+      clientInformation?.client_secret || process.env.INSTAGRAM_APP_SECRET!;
+
     const formData = new FormData();
-    formData.append('client_id', process.env.INSTAGRAM_APP_ID!);
-    formData.append('client_secret', process.env.INSTAGRAM_APP_SECRET!);
+    formData.append('client_id', clientId);
+    formData.append('client_secret', clientSecret);
     formData.append('grant_type', 'authorization_code');
     formData.append(
       'redirect_uri',
@@ -155,8 +165,8 @@ export class InstagramStandaloneProvider
       await fetch(
         'https://graph.instagram.com/access_token' +
           '?grant_type=ig_exchange_token' +
-          `&client_id=${process.env.INSTAGRAM_APP_ID}` +
-          `&client_secret=${process.env.INSTAGRAM_APP_SECRET}` +
+          `&client_id=${clientId}` +
+          `&client_secret=${clientSecret}` +
           `&access_token=${getAccessToken.access_token}`
       )
     ).json();
@@ -165,7 +175,7 @@ export class InstagramStandaloneProvider
 
     const { user_id, name, username, profile_picture_url } = await (
       await fetch(
-        `https://graph.instagram.com/${META_GRAPH_API_VERSION}/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
+        `${META_INSTAGRAM_GRAPH_URL}/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
       )
     ).json();
 
@@ -250,11 +260,17 @@ export class InstagramStandaloneProvider
     );
   }
 
-  async analytics(id: string, accessToken: string, date: number) {
+  async analytics(
+    id: string,
+    accessToken: string,
+    date: number,
+    integration?: Integration
+  ) {
     return instagramProvider.analytics(
       id,
       accessToken,
       date,
+      integration,
       'graph.instagram.com'
     );
   }
@@ -263,13 +279,15 @@ export class InstagramStandaloneProvider
     integrationId: string,
     accessToken: string,
     postId: string,
-    date: number
+    date: number,
+    integration?: Integration
   ) {
     return instagramProvider.postAnalytics(
       integrationId,
       accessToken,
       postId,
       date,
+      integration,
       'graph.instagram.com'
     );
   }

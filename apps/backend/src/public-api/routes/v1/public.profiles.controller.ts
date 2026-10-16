@@ -1,0 +1,35 @@
+import { Controller, Get } from '@nestjs/common';
+import { ApiTags, ApiSecurity, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
+import { GetPublicApiProfileId } from '@gitroom/nestjs-libraries/user/public.api.profile.from.request';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
+import { Organization } from '@prisma/client';
+import * as Sentry from '@sentry/nestjs';
+
+@ApiTags('Public API')
+@ApiSecurity('api-key')
+@Controller('/public/v1')
+export class PublicProfilesController {
+  constructor(private _profileService: ProfileService) {}
+
+  @Get('/profiles')
+  @ApiOperation({
+    summary: 'Listar perfis',
+    description:
+      'Lista os perfis da organização. Chave de org retorna todos; chave de perfil retorna apenas o próprio. Use o `id` como `?profileId` ao criar posts/automações.',
+  })
+  @ApiResponse({ status: 200, description: 'Lista de perfis (id, name, isDefault, hasApiKey).' })
+  async listProfiles(
+    @GetOrgFromRequest() org: Organization,
+    @GetPublicApiProfileId() publicApiProfileId: string | undefined
+  ) {
+    Sentry.metrics.count('public_api-request', 1);
+    if (publicApiProfileId) {
+      const profile = await this._profileService.getProfileById(org.id, publicApiProfileId);
+      if (!profile) return [];
+      return [{ id: profile.id, name: profile.name, isDefault: profile.isDefault, hasApiKey: !!profile.apiKey }];
+    }
+    const profiles = await this._profileService.getProfilesByOrgId(org.id);
+    return profiles.map((p) => ({ id: p.id, name: p.name, isDefault: p.isDefault, hasApiKey: !!(p as any).apiKey }));
+  }
+}

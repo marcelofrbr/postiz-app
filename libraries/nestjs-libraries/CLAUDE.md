@@ -1,0 +1,193 @@
+# NestJS Libraries — Claude Code Instructions
+
+## Position in Hierarchy
+
+- **Parent:** [`/CLAUDE.md`](../../CLAUDE.md)
+- **Relevant siblings:**
+  - [`apps/backend/CLAUDE.md`](../../apps/backend/CLAUDE.md) — controllers that import these services
+  - [`apps/orchestrator/CLAUDE.md`](../../apps/orchestrator/CLAUDE.md) — activities that import these services
+  - [`libraries/react-shared-libraries/CLAUDE.md`](../react-shared-libraries/CLAUDE.md) — frontend counterpart
+- **Children (subareas with their own CLAUDE.md):**
+  - [`src/integrations/social/CLAUDE.md`](src/integrations/social/CLAUDE.md) — social media providers
+  - [`src/ai/CLAUDE.md`](src/ai/CLAUDE.md) — AI Provider System, credits, persona, KB
+  - [`src/chat/CLAUDE.md`](src/chat/CLAUDE.md) — Mastra agents, MCP tools, IG webhook
+
+## What lives here
+
+**Shared business logic** between `apps/backend` and `apps/orchestrator`. Main subdomains:
+
+| Subdomain | Content |
+|---|---|
+| `database/prisma/` | Prisma schema + repositories per table (`agencies`, `posts`, `credentials`, `profiles`, `users`, `sets`, `flows`, `subscriptions`, `status/status-event.*` — append-only `StatusEvent` failure log, denormalized/no-FK, fail-soft `record()` + cursor-paginated `list()`, etc.); also read-only aggregation services with no table of their own (e.g. `status/status.service.ts`, composing `IntegrationRepository`/`PostsRepository`/`FlowsRepository` via `Promise.all` for the admin Status screen; `status/infra-health.*` — active liveness probes of PostgreSQL/Redis/Temporal/`IUploadProvider.healthCheck()` for the Status > Saúde da infra tab, 30s cache with `force` bypass, no table of its own) |
+| `integrations/social/` | 40+ social media providers — see [child](src/integrations/social/CLAUDE.md) |
+| `ai/` | AI Provider System, credits, persona, KB — see [child](src/ai/CLAUDE.md) |
+| `chat/` | Mastra agents, MCP tools, IG webhook, knowledge base RAG — see [child](src/chat/CLAUDE.md) |
+| `dtos/` | Shared contracts (`class-validator` + `class-transformer`) |
+| `services/` | Auth, permissions, file upload, email, notifications, etc. |
+| `agent/` | Mastra base agent + generic tools |
+| `temporal/` | Shared Temporal client |
+| `redis/` | Pub/sub, cache |
+| `crypto/` | AES-256-GCM helpers (same `ENCRYPTION_KEY` for OAuth and AI keys) |
+| `sentry/` | `initializeSentry`, global `FILTER`, exception capture |
+| `test/` | Test helpers (`createMock`, `createPrismaRepositoryMock`, `createTestModule`) |
+
+## TDD is Mandatory
+
+Every feature/bug/refactor follows the cycle:
+
+1. **RED** — Write the `.spec.ts` first (it must fail).
+2. **GREEN** — Implement the minimum code to make it pass.
+3. **REFACTOR** — Clean up while keeping tests green.
+
+### Rules
+
+- **Never** commit production code without a corresponding `.spec.ts`.
+- Specs are **co-located**: `foo.service.ts` → `foo.service.spec.ts` in the same directory.
+- The suffix is **`.spec.ts`** (not `.test.ts`).
+- Run `pnpm test` (or `pnpm test:libs`) before each commit.
+
+### Test helpers (always use these)
+
+All exported from `@gitroom/nestjs-libraries/test`:
+
+```typescript
+import {
+  createMock,
+  createPrismaRepositoryMock,
+  createTestModule,
+} from '@gitroom/nestjs-libraries/test';
+```
+
+| Helper | When to use |
+|---|---|
+| `createMock<T>()` | Mock any class via `jest-mock-extended` (no need for an explicit interface) |
+| `createPrismaRepositoryMock('tableName')` | Mock a `PrismaRepository<T>` with `model.[table]` mocked |
+| `createTestModule({ service, mocks })` | Factory for a NestJS `TestingModule` with auto-mocks when there are many dependencies |
+
+### Approach by layer
+
+| Layer | What to test | How to mock |
+|---|---|---|
+| **Service** | Business logic, branching, delegation | `createMock<Repository>()` or `createTestModule()` |
+| **Repository** | Prisma query construction, data transformation | `createPrismaRepositoryMock('table')` |
+| **Controller** | HTTP layer, param extraction, guards | `@nestjs/testing` with mocked service |
+| **Social Provider** | Post formatting, auth URLs, error handling | Direct instantiation + `jest.spyOn` for HTTP |
+
+### Test structure
+
+```typescript
+describe('ClassName', () => {
+  describe('methodName', () => {
+    it('should <expected behavior> when <condition>', async () => {
+      // ARRANGE — prepare mocks and data
+      // ACT — execute the method
+      // ASSERT — verify the result
+    });
+  });
+});
+```
+
+### Coverage priority
+
+1. Services with business logic (highest value)
+2. Social providers (isolated, no DI)
+3. Repositories with data transformation
+4. Controllers (thin layer, lowest priority)
+
+### Reference examples
+
+- Simple service: `database/prisma/sets/sets.service.spec.ts`
+- Repository: `database/prisma/sets/sets.repository.spec.ts`
+- AI provider system: run `pnpm jest libraries/nestjs-libraries/src/ai/ --no-coverage` (118 specs)
+
+## Library-Specific Patterns
+
+### Repository pattern (Prisma)
+
+Every table has a repository at `database/prisma/<table>/<table>.repository.ts` extending `PrismaRepository<T>`. Services inject the repository and **never** use `PrismaService` directly. The single exception: very specific compositions that need a multi-table transaction (use `prisma.$transaction(...)` in the service).
+
+### DTOs
+
+Shared DTOs live in `dtos/<area>/<name>.dto.ts`. Use `class-validator` for validation and `class-transformer` for serialization. **Keep them in sync with the Prisma schema** when they represent DB entities.
+
+### Crypto
+
+For encrypting sensitive values (OAuth tokens, AI keys, messaging tokens): use the `crypto/` helpers. Environment variable: `ENCRYPTION_KEY` (the same one used for OAuth and [AI](src/ai/CLAUDE.md)). AES-256-GCM is the canonical scheme.
+
+### Profile access & org role resolution
+
+- `getOrgRole(org)` (`src/user/org.role.ts`) is the canonical, fail-closed way to read a resolved org's role (`org.users[0]?.role ?? Role.USER`) — use it instead of accessing `org.users[0].role` directly in new guards/services.
+- `ProfileAccessGuard` (`src/services/auth/profile-access/`) is the global guard enforcing per-profile isolation (closed-by-default): org `ADMIN`/`SUPERADMIN` get implicit access to every profile (no `ProfileMember` rows needed); org `USER` needs a resolved `req.profile` (set by `AuthMiddleware`) or gets `403 NO_PROFILE_ASSIGNED`. Decorators: `@ProfileManage({ param })` (require `OWNER`/`MANAGER`), `@SkipProfileAccess()` (exempt a route).
+- `isAuthBypassPath` (`src/services/auth/auth-bypass-paths.ts`) is the shared, exact-segment path-bypass helper used by both `PoliciesGuard` and `ProfileAccessGuard` — never write an ad-hoc `path.indexOf('/auth')`-style substring check for a new bypass list; it would also match unrelated routes like `/oauth/authorize`.
+
+## Key File Map
+
+| File | Purpose |
+|---|---|
+| `src/database/prisma/schema.prisma` | Canonical schema (55+ domain models + 8 Mastra-internal). High-level map in [`docs/architecture/database-schema.md`](../../docs/architecture/database-schema.md) |
+| `src/database/prisma/prisma.service.ts` | Root `PrismaService`; inject **only** in repositories |
+| `src/database/prisma/<table>/<table>.repository.ts` | Per-table repositories (`PrismaRepository<T>` pattern) |
+| `src/database/prisma/startup-migration.service.ts` | **Code-level data migrations** that run on every app startup (idempotent backfills, not schema changes — see pitfall below). Também reconcilia os **repost workflows** no boot (`reconcileRepostWorkflows` → `RepostService.reconcileWorkflows`, self-heal idempotente via `USE_EXISTING`) |
+| `src/database/prisma/flows/unmatched-comment.service.ts` | Inbox operations for unbound IG comments: `listInbox`, `bindToFlow`, `ignore`, `enrich`, `cleanupExpired` (30d PENDING retention, registered in `StartupMigrationService`), `getMediaMetadataCached` (Redis 24h), `listAliasesEnriched` |
+| `src/database/prisma/profiles/profile.seed.module.ts` | `ProfileSeedService` (`OnModuleInit`) — one-time-per-org bootstrap of default/customer profiles and legacy `USER` membership backfill, gated by `Organization.profilesBootstrappedAt` (see pitfall below) |
+| `src/database/prisma/migrations/` | **Schema-level Prisma migrations** (DDL applied via `pnpm prisma-db-push`) |
+| `src/test/mock.factory.ts` | `createMock`, `createPrismaRepositoryMock` |
+| `src/test/create-testing-module.ts` | `createTestModule({ service, mocks })` |
+| `src/sentry/initialize.sentry.ts` | Sentry bootstrap (called by `apps/backend/src/main.ts`) |
+| `src/sentry/sentry.exception.ts` | Global exception `FILTER` |
+| `src/crypto/` | AES-256-GCM helpers |
+| `src/integrations/meta-system-user.service.ts` | `MetaSystemUserService.resolveHealedToken(integration, provider)` — self-heals FB/IG publish tokens via the Meta System User token when the human OAuth session dies (see Known Pitfalls below) |
+
+## Common Workflows
+
+### Add a new service
+
+1. **Spec first** (RED): `<area>/<name>.service.spec.ts` with expected scenarios, using `createMock` or `createTestModule`.
+2. **Implement** `<area>/<name>.service.ts` minimally to pass the spec (GREEN).
+3. **Repository** if DB access is needed: `<area>/<name>.repository.spec.ts` + `<area>/<name>.repository.ts` extending `PrismaRepository<T>`.
+4. **Refactor** with tests green.
+5. Register the provider in the corresponding `<area>.module.ts`.
+6. Import from a controller (in `apps/backend`) or activity (in `apps/orchestrator`) — never call Prisma directly outside the repository.
+
+### Add a new table
+
+1. Edit `schema.prisma`, run `pnpm prisma-generate` + `pnpm prisma-db-push`. Quick map of where each existing table fits the domain: [`docs/architecture/database-schema.md`](../../docs/architecture/database-schema.md).
+2. Create the repository with a spec (RED → GREEN → REFACTOR).
+3. Create the service with a spec.
+4. Create the DTO under `dtos/` if it represents an HTTP contract.
+5. **CHANGELOG.md** under `[Unreleased]` (describe the user impact, not the technical detail).
+6. If the migration needs to **backfill existing data with application logic** (not a pure DDL change), add an idempotent method to `startup-migration.service.ts` — do NOT create a one-off Prisma migration with raw SQL when the transformation needs joins, format conversion, or conditional logic. See pitfall on `StartupMigrationService` below.
+
+## Known Pitfalls
+
+1. **Symptom:** spec failing with `Cannot find module '@gitroom/nestjs-libraries/test'` → **Cause:** path/alias misconfigured. **Fix:** check `tsconfig.json` at the root and the `paths` in nestjs-libraries `tsconfig.lib.json`.
+2. **Symptom:** Prisma mock "leaks" between tests → **Cause:** `createPrismaRepositoryMock` reused across `it` blocks. **Fix:** create the mock in `beforeEach`.
+3. **Symptom:** service injecting `PrismaService` instead of a repository → **Cause:** shortcut. **Fix:** create a repository, even if minimal. Keeps DI testable and the monorepo pattern consistent.
+4. **Symptom:** AES decryption returning garbage after a deploy change → **Cause:** `ENCRYPTION_KEY` changed between environments. **Fix:** preserve the key (it's the same one for OAuth and AI keys); rotating it requires a re-encrypt migration.
+5. **Symptom:** spec passes locally but fails in CI → **Cause:** test ordering (shared state, global mock). **Fix:** isolate state in `beforeEach`/`afterEach`; never use `--bail` to mask the issue.
+6. **Symptom:** App starts cleanly after deploy but data looks wrong (rows with stale `lateApiKey`, `providerIdentifier='late-X'` instead of `zernio-X`, missing `RepostRuleDestination` rows, etc.) → **Cause:** `StartupMigrationService` (`OnModuleInit`) runs every startup with three idempotent migrations (`migrateProfileScope`, `migrateLateToZernio`, `backfillRepostDestinations`), but it **swallows errors** — failures are only logged, the app keeps running. **Fix:** tail the backend logs on deploy for `Late->Zernio migration failed:` / `Profile scope migration failed:` / `Backfill RepostRuleDestination falhou:`. Each method begins with a `count()` guard that skips when no rows need work, so re-running is safe — just fix the underlying issue and restart the backend. New data migrations belong here when they need application-level logic (joins, format mapping, conditional updates) — pure DDL still goes through Prisma migrations. **`onModuleInit` também roda passos além de migração de dados** — notavelmente `reconcileRepostWorkflows`, que **inicia workflows Temporal** (idempotente via `workflowIdConflictPolicy: 'USE_EXISTING'`, no-op quando já rodando) para cada `RepostRule` habilitada, fazendo self-heal dos repost workflows após deploy/restart. **`reconcileRefreshTokensCron`** segue o mesmo padrão: garante o workflow SINGLETON `refresh-tokens-cron` (refresh proativo de tokens em lote) via `RefreshIntegrationService.ensureRefreshTokensCronWorkflow()` (`USE_EXISTING`). Como `DatabaseModule` é `@Global`, ambos rodam no boot do backend **e** do orchestrator; a 2ª execução vira no-op. Tail para `reconcileRepostWorkflows falhou:` / `reconcileRefreshTokensCron falhou:` (mesmo padrão swallow-and-log). Ver também o pitfall #9 em [`apps/orchestrator/CLAUDE.md`](../../apps/orchestrator/CLAUDE.md) (por que workflows de loop longo precisam de `continueAsNew` + `try/catch` + reconciliação).
+7. **Symptom:** `PENDING UnmatchedComment` rows (or any other time-windowed log) accumulate indefinitely after adding a new inbox-like feature → **Cause:** time-windowed cleanup must be registered in `StartupMigrationService.onModuleInit`, not as a standalone `@Cron` service. Canonical examples: `cleanupExpiredUnmatchedComments` (30-day retention) and `cleanupExpiredStatusEvents` (90-day retention, prunes the `StatusEvent` history log powering Status > Histórico) — both count-guard idempotent, swallow errors per existing pattern. **Fix:** add an idempotent cleanup method to `StartupMigrationService` and call it from `onModuleInit`. Do NOT create a separate cron service.
+8. **Symptom:** an org member removed from a profile by an admin appears to get `EDITOR` access back after a backend restart → **Cause:** looks like `ProfileSeedService` (`database/prisma/profiles/profile.seed.module.ts`) always backfills legacy `USER` memberships on `OnModuleInit`. **Fix:** the backfill is gated by `Organization.profilesBootstrappedAt` — it runs once per org and is skipped afterward, even across redeploys; new orgs are marked bootstrapped at creation (`createOrgAndUser`/`createMaxUser`). Check the column before assuming stale re-seeding behavior.
+9. **Symptom:** a Facebook Page or Instagram (Facebook Login) channel keeps flipping back to "needs reconnecting" / gets disconnected, even though the Page/IG account itself is healthy → **Cause:** `facebook`/`instagram` providers declare `noNativeRefresh = true` — their `refreshToken()` is a stub (a Page Access Token has no `refresh_token` flow); when the human OAuth token dies (a Meta security checkpoint invalidates the session) there is no native way to renew it, and both call sites (`RefreshIntegrationService.refreshProcess` at post-time, `IntegrationService.refreshTokens` in the batch cron) used to fall straight into `disconnectChannel`. **Fix:** configure a Meta **System User token** (Settings > Credenciais > Instagram `metaSystemUserToken`, org-wide fallback via env `META_SYSTEM_USER_TOKEN`) — `MetaSystemUserService.resolveHealedToken` (`src/integrations/meta-system-user.service.ts`) re-derives a fresh Page Access Token from it via `provider.reConnect(internalId, internalId, suToken)`, bypassing the dead human session; the healed token gets a synthetic 10-year `expiresIn` (`SYSTEM_USER_PAGE_TOKEN_TTL`) so the channel drops out of the cron's ≤1-day refresh window. **Also note:** even without a System User token configured, the batch cron no longer disconnects `noNativeRefresh` providers on every stub `refreshToken()` miss (that was a false-disconnect bug) — it skips them silently, since real token death is still caught and handled at post time. See also the `noNativeRefresh` / three-Meta-credential-layers doc in [`src/integrations/social/CLAUDE.md`](src/integrations/social/CLAUDE.md). Tail `[meta-system-user] heal falhou` in the logs to see why a heal attempt failed.
+10. **Symptom:** an API payload containing `"false"` enables a boolean option, or an invalid number string is silently accepted → **Cause:** `PostsService.mapTypeToPost` enabled implicit class-transformer conversion; JavaScript also treats every non-empty string as truthy. **Fix:** keep `enableImplicitConversion: false` at the post boundary so new invalid payloads fail with 400, and use `SocialAbstract.assetBoolean` only when executing legacy provider settings already stored in the database. Do not re-enable global coercion to accommodate a non-conforming client.
+11. **Symptom:** editing or moving an already-published post unexpectedly publishes it again → **Cause:** `schedule` changes a `PUBLISHED` post back to `QUEUE`, clears its release IDs and restarts the Temporal workflow. **Fix:** keep `republish === true` as the only explicit opt-in; use `update` when changing details/date without another publication. In the fork, `changeDate` keeps `profileId` as its fifth positional argument and appends `republish` as the sixth — never swap them, or a profile ID becomes a truthy opt-in.
+12. **Symptom:** a Jest spec importing `allowed.upload.mime.ts` fails on `import` syntax inside `node_modules/file-type` → **Cause:** `file-type` 22 is ESM while ts-jest executes this library as CommonJS. **Fix:** mock `file-type` explicitly with `fileTypeFromBuffer` in the unit spec and retain the child-process contract in `allowed.upload.mime.spec.ts`, which loads the real package under the supported Node 22 runtime. Production already starts CommonJS bundles with `--experimental-require-module`; do not downgrade `file-type` or duplicate magic-byte allowlists to silence Jest.
+
+## Commands
+
+```bash
+pnpm test                 # All tests (with coverage)
+pnpm test:watch           # Watch mode during development
+pnpm test:libs            # Specs in the libraries only
+pnpm test:backend         # Specs in the backend (but the logic being tested lives here)
+pnpm prisma-generate      # After changing schema.prisma
+pnpm prisma-db-push       # Apply the schema to the database
+```
+
+## References
+
+- [`src/ai/CLAUDE.md`](src/ai/CLAUDE.md) — AI Provider System in detail
+- [`src/chat/CLAUDE.md`](src/chat/CLAUDE.md) — Mastra, MCP tools, IG webhook
+- [`src/integrations/social/CLAUDE.md`](src/integrations/social/CLAUDE.md) — providers and OAuth patterns
+- [`docs/architecture/database-schema.md`](../../docs/architecture/database-schema.md) — high-level map of all 55+ Prisma models grouped by domain, with repository paths and child-CLAUDE.md cross-references
+- [`docs/architecture/`](../../docs/architecture/) — diagrams and ADRs

@@ -1,0 +1,186 @@
+# Social Integrations — Claude Code Instructions
+
+## Position in Hierarchy
+
+- **Parent:** [`libraries/nestjs-libraries/CLAUDE.md`](../../../CLAUDE.md)
+- **Grandparent:** [`/CLAUDE.md`](../../../../../CLAUDE.md)
+- **Relevant siblings:**
+  - [`src/chat/CLAUDE.md`](../../chat/CLAUDE.md) — IG webhook and HMAC validation; MCP tools that trigger integrations
+  - [`src/ai/CLAUDE.md`](../../ai/CLAUDE.md) — encryption (`ENCRYPTION_KEY`) that also protects these tokens
+  - [`apps/orchestrator/CLAUDE.md`](../../../../../apps/orchestrator/CLAUDE.md) — activities that call these providers
+
+## What lives here
+
+40+ social media providers. Each provider implements `SocialProvider` (from `social.integrations.interface.ts`) and extends `SocialAbstract` (from `../social.abstract.ts`), with OAuth, refresh token, posting, and error handling.
+
+| Category | Content |
+|---|---|
+| Native providers | `bluesky`, `dev.to`, `discord`, `dribbble`, `facebook`, `farcaster`, `gmb`, `hashnode`, `instagram`, `instagram.standalone`, `kick`, `lemmy`, `linkedin`, `linkedin.page`, `listmonk`, `mastodon` (2 variants), `medium`, `mewe`, `moltbook`, `nostr`, `pinterest`, `reddit`, `skool`, `slack`, `telegram`, `threads`, `tiktok`, `twitch`, `vk`, `whop`, `wordpress`, `x`, `youtube` |
+| Providers via Zernio | `zernio-bluesky`, `zernio-facebook`, `zernio-googlebusiness`, `zernio-instagram`, `zernio-linkedin`, `zernio-pinterest`, `zernio-reddit`, `zernio-snapchat`, `zernio-telegram`, `zernio-threads`, `zernio-tiktok`, `zernio-twitter`, `zernio-youtube` |
+| Instagram helpers | `instagram-route.resolver.ts`, `instagram-messaging.service.ts`, `instagram-dm-button.type.ts` |
+| Base classes | `../social.abstract.ts` (`SocialAbstract` + `RefreshToken`/`BadBody`/`NotEnoughScopes`), `zernio.base.provider.ts` (base for all Zernio providers) |
+
+## Specific Patterns and Rules
+
+### 1. Every provider extends `SocialAbstract` and implements `SocialProvider`
+
+`SocialAbstract` contract:
+
+- `RefreshToken` (thrown when token is expired)
+- `BadBody` (thrown when payload is invalid for the destination)
+- `NotEnoughScopes` (thrown when OAuth did not request enough scopes)
+- `fetch()` / `handleErrors()` / mention helper, all shared
+
+### 2. `ClientInformation` propagation is MANDATORY in OAuth
+
+The `generateAuthUrl(clientInformation?)` and `authenticate(...)` methods receive `ClientInformation` (from the workspace or active profile) with `clientId`, `clientSecret`, `instanceUrl` (Mastodon/Zernio), and per-profile settings.
+
+**Never hardcode `process.env.X_CLIENT_ID`** inside the provider. Always use `clientInformation.clientId` (with an env fallback only when `clientInformation` is `undefined` — legacy path).
+
+Reason (from auto-memory `feedback_per_profile_credentials.md`): OAuth credentials are **per-profile**, sourced from `Credentials` in the DB. Hardcoding env breaks multi-tenancy.
+
+### 3. Instagram routing via `resolveIgRoute`
+
+Canonical function in `instagram-route.resolver.ts`:
+
+```typescript
+import { resolveIgRoute } from '@gitroom/nestjs-libraries/integrations/social/instagram-route.resolver';
+const route = await resolveIgRoute(integration, instagramMessagingService);
+// route.token, route.host, route.useIgGraph, route.source
+```
+
+**Resolution priority**:
+
+1. `providerIdentifier === 'instagram-standalone'` → `IG_LOGIN_GRAPH` (`graph.instagram.com`) + IG User Token from `Integration.token`
+2. IG User Token registered in `Credentials.instagramTokens` → `IG_LOGIN_GRAPH`
+3. Fallback: `FB_LOGIN_GRAPH` (`graph.facebook.com`) + Page Access Token from `Integration.token`
+
+**Never** hardcode host or token in activities/services that touch IG endpoints (comments, DMs, follow-check, stories, reposts). Reason (from auto-memory `feedback_ig_token_routing.md`): Standard Access via IG Login bypasses App Review — critical for self-hosted deployments.
+
+### 4. Three Meta credential layers (NEVER mix)
+
+| Layer | Source | Use |
+|---|---|---|
+| **App credentials** (workspace) | `Credentials.clientId/clientSecret`, `instagramAppId/instagramAppSecret`, `threadsAppId/threadsAppSecret` | OAuth (`generateAuthUrl`/`authenticate`) and webhook HMAC validation |
+| **Integration token** | `Integration.token` is a Page Access Token (`providerIdentifier='instagram'`) **OR** an IG User Token (`providerIdentifier='instagram-standalone'`) | Posting, comments, refresh |
+| **Messaging tokens** (Settings > Credenciais > Instagram) | `Credentials.metaSystemUserToken` + `Credentials.instagramTokens` (per-account JSON) | DM and follow-check activities via the registered IG User Token. `metaSystemUserToken` ALSO powers the **publish self-heal**: when the human OAuth token dies (Meta account checkpoint), `MetaSystemUserService.resolveHealedToken` re-derives the Page Access Token via `reConnect(internalId, internalId, suToken)` instead of disconnecting the channel |
+
+Details: [`docs/architecture/instagram-automations.md`](../../../../../docs/architecture/instagram-automations.md).
+
+**Credential resolution differs between the two uses of `metaSystemUserToken` (intentional):** messaging reads via `getMessagingTokens` (`getRaw` — exact profile match, no inheritance); publish self-heal reads via `CredentialService.getSystemUserToken` (`getRawShared` — inherits from the Default profile when `shareProviderCredentialsWithProfiles` is on, then falls back to env `META_SYSTEM_USER_TOKEN`). `facebook`/`instagram` providers carry `noNativeRefresh = true` (their `refreshToken()` is a stub — a Page Access Token has no refresh_token flow), which tells the batch cron (`IntegrationService.refreshTokens`) to skip disconnecting them when no heal is available (the false-disconnect fix); real token death is still detected and handled at post time (`RefreshIntegrationService.refreshProcess`).
+
+## Zernio (formerly Late / getlate.dev)
+
+The [Zernio API](https://docs.zernio.com/llms-full.txt) is an alternative provider for channels that require complex OAuth: TikTok, Pinterest, X, Snapchat, Threads, Bluesky, Reddit, Telegram, Google Business, YouTube, Facebook, Instagram, LinkedIn (13 platforms).
+
+### Architecture
+
+- **Base**: `zernio.base.provider.ts` — `ZernioBaseProvider extends SocialAbstract` with the `Zernio` SDK (`@zernio/node`) and a Redis cache (TTL 5min) for usage stats.
+- **Concrete providers**: `zernio-<platform>.provider.ts` — they inherit from `ZernioBaseProvider`, passing `platform`, `platformName`, `charLimit`. Marked with `hiddenFromList = true` (they do not appear under "Add Channel" directly — they enter via "Add Channel > Zernio" or "Send Invite Link > Zernio").
+- **Identifier**: `zernio-${platform}` (e.g., `zernio-tiktok`, `zernio-pinterest`).
+- **Per-profile API key**: resolved via `clientInformation.instanceUrl` (per-profile override) with org-level fallback controlled by the `shareZernioWithProfiles` flag.
+
+### Supported flows
+
+1. **Add Channel > Zernio**: admin selects an account already connected in their Zernio account.
+2. **Send Invite Link > Zernio**: admin generates a per-platform OAuth link for the client to connect — endpoint `POST https://zernio.com/api/v1/platform-invites` (response shape: `{ invite: { inviteUrl, ... } }`).
+
+After the client connects via the invite, the admin returns to "Add Channel > Zernio" and adds the new account.
+
+### Frontend
+
+- Modals: `apps/frontend/src/components/launches/zernio/` (`zernio-account-modal.tsx`, `zernio-invite-modal.tsx`, etc.).
+
+### Why Zernio and not Late
+
+The company fully rebranded Late/getlate.dev → Zernio (same company, new brand). The codebase migrated all providers and naming. There is no longer any `late.*.provider.ts` — only some legacy visual assets in `apps/frontend/public/icons/platforms/late.svg|png`.
+
+## Key File Map
+
+| File | Purpose |
+|---|---|
+| `../social.abstract.ts` | Base class + error classes (`RefreshToken`, `BadBody`, `NotEnoughScopes`); `fetch()` para publicação e `analyticsFetch()` para métricas |
+| `social.integrations.interface.ts` | Interfaces (`SocialProvider`, `ClientInformation`, `AuthTokenDetails`, `PostDetails`, `PostResponse`) |
+| `facebook.provider.ts` | FB Page via Facebook Login (Page Access Token, host `graph.facebook.com`). `post()` ramifica por `settings.post_type`: feed/reel (`/photos`+`/feed`, `/videos`) **ou** Story — foto via `/photo_stories` (upload unpublished → `photo_id`) e vídeo via `/video_stories` (upload resumável 3 fases: `start`→rupload com header `file_url`→`finish`). Story não tem carrossel: cada mídia vira um story separado. Scopes de Story já estão nos `scopes` do provider (sem reconexão) |
+| `instagram.provider.ts` | IG via Facebook Login (Page Access Token, host `graph.facebook.com`); includes `getMediaMetadata(mediaId, token, host?)` for inbox/dark-post enrichment |
+| `instagram.standalone.provider.ts` | IG via Instagram Login (IG User Token, host `graph.instagram.com`) — preferred for self-hosted |
+| `instagram-route.resolver.ts` | `resolveIgRoute` — picks the correct host/token |
+| `meta-graph.constants.ts` | Single source of truth for Meta Graph API version, Facebook/Instagram hosts and versioned base URLs. OAuth exchange/refresh endpoints remain deliberately unversioned. |
+| `gmb.provider.ts` + `gmb.provider.spec.ts` | Native Google Business Profile — shared per-profile Google credentials, location discovery, confirmed local-post creation and reconnect-safe refresh tokens |
+| `instagram-messaging.service.ts` | Registered tokens (Meta System User Token + per-account IG User Tokens) |
+| `instagram-dm-button.type.ts` | Types for the follow-gate postback button |
+| `pinterest.provider.ts` + `pinterest.provider.spec.ts` | Native Pinterest — per-profile OAuth credentials, image/video pin upload, bounded video-processing polling and 89-day analytics window |
+| `wordpress.provider.ts` + `wordpress.provider.spec.ts` | WordPress REST connection/posting — Application Password authentication, normalized URLs, SSRF-safe diagnostics and optional status/category/tag settings |
+| `zernio.base.provider.ts` | Base for all Zernio providers (Redis cache, helpers) |
+| `x.provider.ts` + `x.provider.spec.ts` | X/Twitter — example of a tested provider |
+
+## Common Workflows
+
+### Add a new provider
+
+1. **Spec first** if the provider has non-trivial logic (post formatting, upload retry, response parsing). See `x.provider.spec.ts` as reference.
+2. Create `<platform>.provider.ts` extending `SocialAbstract` + `implements SocialProvider`.
+3. **OAuth**:
+   - `generateAuthUrl(clientInformation?: ClientInformation)` — ALWAYS use `clientInformation.clientId/clientSecret/instanceUrl` (with `process.env` fallback only for legacy, ideally not at all).
+   - `authenticate(...)` — same rule.
+4. **Post**: `post(...)` with error handling that throws `RefreshToken`/`BadBody`/`NotEnoughScopes` when applicable.
+5. **Refresh** (if expiration applies): the refresh method also propagates `ClientInformation`.
+6. Register in `IntegrationManager` (`database/prisma/integrations/integration.manager.ts`) with a unique identifier.
+7. **Frontend**: icon in `apps/frontend/public/icons/platforms/<provider>.svg`. Settings in `apps/frontend/src/components/launches/providers/<provider>/`.
+8. **CHANGELOG.md** under `[Unreleased]`.
+
+### Add a provider via Zernio
+
+1. Create `zernio-<platform>.provider.ts` inheriting from `ZernioBaseProvider`. The constructor passes `(platform, platformName, charLimit)`.
+2. Register in `IntegrationManager`.
+3. Frontend: already exposed via "Add Channel > Zernio" — common UI.
+
+### OAuth diagnostics
+
+1. Is `clientInformation` arriving? Log it at the start of `generateAuthUrl`.
+2. Are you using `clientInformation.clientId` or `process.env.X_CLIENT_ID`? It must be the former.
+3. For IG/FB: confirm `instagramAppId`/`instagramAppSecret` or `clientId`/`clientSecret` — depends on which Meta product the app is using.
+
+## Known Pitfalls
+
+1. **Symptom:** OAuth works in one org but fails in another → **Cause:** provider hardcodes `process.env.X_CLIENT_ID` instead of using `clientInformation`. **Fix:** propagate `ClientInformation` in **`generateAuthUrl` AND `authenticate`** (and refresh, if applicable).
+2. **Symptom:** IG comment activity returns 400/403 → **Cause:** wrong host/token for the integration type. **Fix:** always `resolveIgRoute(integration, ...)`. Never hardcode `graph.facebook.com`.
+3. **Symptom:** IG webhook accepts events, but `is_user_follow_business` does not work → **Cause:** Facebook Login Page Access Token does not have Standard Access to that field. **Fix:** install `instagram.standalone.provider` (IG Login) or register an IG User Token under Settings > Credenciais > Instagram.
+4. **Symptom:** Zernio returns "API key invalid" → **Cause:** `clientInformation.instanceUrl` (which carries the key) is not being read. **Fix:** check the `generateAuthUrl` flow of `ZernioBaseProvider` — the key resolves per-profile first, then org with `shareZernioWithProfiles`.
+5. **Symptom:** Trying to import `late.*.provider` → **Cause:** Late was removed (rebranded to Zernio). **Fix:** use `zernio-<platform>.provider.ts`.
+6. **Symptom:** Token refresh in an infinite loop → **Cause:** `RefreshToken` thrown even after a successful refresh. **Fix:** ensure the new token updates `Integration.token` and the original call is retried with the new token.
+7. **Symptom:** `GET /{mediaId}?fields=...,boost_eligibility_info` returns `"(#100) Tried accessing nonexisting field"` → **Cause:** `boost_eligibility_info` only exists on the Facebook Login Graph (`graph.facebook.com`); the Instagram Login Graph (`graph.instagram.com` / standalone) does not expose it. Per [Meta docs](https://developers.facebook.com/docs/instagram-platform/reference/instagram-media), only "Instagram API with Facebook Login" supports it. **Fix:** check `host.includes('graph.facebook.com')` before including the field. `InstagramProvider.getMediaMetadata` already implements this guard with a retry-without-field safety net — reuse it instead of writing a new Graph API call for media metadata.
+8. **Symptom:** `facebook`/`instagram` channel keeps needing reconnection even though the Page/IG account is healthy → **Cause:** both providers have `noNativeRefresh = true` (stub `refreshToken()` — see "Three Meta credential layers" above); a dead human OAuth session has no native renewal path. **Fix:** configure a Meta System User token so `MetaSystemUserService.resolveHealedToken` can re-derive the Page Access Token instead of disconnecting the channel. Full pitfall write-up: [`libraries/nestjs-libraries/CLAUDE.md`](../../../CLAUDE.md) Known Pitfalls.
+
+8. **Symptom:** saving the Meta **System User Token** fails with `"(#100) Tried accessing nonexisting field (business)"` → **Cause:** the validation asked `/me?fields=...,business`. The [System User node](https://developers.facebook.com/docs/graph-api/reference/system-user/) exposes only `id`, `name`, `created_by`, `created_time`, `finance_permission`, `ip_permission` — there is no `business` field, and the Graph rejects the whole request, so a perfectly valid token gets refused. **Fix:** validate with `/me?fields=id,name` and resolve the Business Manager via the `/me/businesses` edge (same path `InstagramProvider.pages` already uses). Related: a System User usually does **not** appear in `/me/accounts` (that edge lists pages of a user who went through the OAuth dialog) — discover its pages via `/me/assigned_pages` plus `owned_pages`/`client_pages` per business, and keep every step after `/me` fail-soft. Canonical implementation: `InstagramMessagingService.validateSystemUserToken` + `collectSystemUserPages`. **Granted scopes ≠ assigned assets:** a System User with every scope still reaches zero accounts until the Page/IG account is added under Business Settings > System Users > *Add Assets*.
+
+9. **Symptom:** a Meta feature works in one subsystem but another still calls an older Graph version → **Cause:** a provider/service embedded `v20.0`, `v21.0` or `v25.0` directly. **Fix:** use `META_GRAPH_API_VERSION`, `META_FACEBOOK_GRAPH_URL`, `META_INSTAGRAM_GRAPH_URL` or `metaGraphUrl(host)` from `meta-graph.constants.ts`. Do not version the dedicated Instagram token exchange/refresh endpoints (`api.instagram.com/oauth/access_token`, `graph.instagram.com/access_token`, `graph.instagram.com/refresh_access_token`). Version choice never replaces `resolveIgRoute`; host/token routing remains separate.
+
+10. **Symptom:** Pinterest video fails as corrupted when a cover image is attached before the MP4, or a workspace credential is ignored → **Cause:** the upload used `media[0]` instead of the detected MP4 and older OAuth methods read only `PINTEREST_CLIENT_ID/SECRET`. **Fix:** preserve the `findMp4.path` upload and propagate `ClientInformation` through `generateAuthUrl`, `authenticate` and `refreshToken`. Keep video download/upload on `getSsrfSafeAxios`; do not replace it with raw Axios. Pinterest analytics accepts at most 90 days, so the provider deliberately uses 89 days as a UTC safety margin.
+
+11. **Symptom:** GMB appears published with an empty external ID, or works immediately after reconnect and falls again about one hour later → **Cause:** the v4 API may answer HTTP 200 with `state: REJECTED`, no `name`, an empty/non-JSON body, or the reconnect may discard the newly issued Google `refresh_token`. **Fix:** treat only a named, non-rejected local post as success; keep `keepReconnectAuthTokens`, `include_granted_scopes: false` and best-effort revocation aligned with YouTube. GMB intentionally resolves the per-profile credential under the `youtube` alias because the settings card represents the shared Google OAuth app. Register both `/integrations/social/youtube` and `/integrations/social/gmb` as authorized redirect URIs.
+
+12. **Symptom:** WordPress connection reports only “Invalid credentials”, works inconsistently by domain formatting, or fails behind a security plugin → **Cause:** older code parsed every response as JSON and collapsed network, HTTP and HTML failures into one catch. **Fix:** normalize only the request URL, keep the stored token/internal ID compatible, distinguish unreachable/401-403/other HTTP/non-JSON responses, and always use `ssrfSafeFetch`; never replace it with raw `fetch`. Logs may contain origin, status and WordPress error code, but never Basic auth, username, password or raw response body.
+
+13. **Symptom:** analytics waits through posting retries, emits `BadBody`, or stops triggering token self-heal after an upstream sync → **Cause:** metric reads used `fetch()` from the posting pipeline, or were replaced with raw global `fetch`. **Fix:** use `analyticsFetch()`: it keeps SSRF/DNS-pinning, performs one request, does not throw `BadBody`, and preserves only `RefreshToken` for HTTP 401/provider-classified token failures. Do not use it for posting, polling publication state outside analytics, missing-content discovery or plugs.
+
+14. **Symptom:** a legacy post with a provider flag stored as the string `"false"` enables Trial Reel, PDF carousel, TikTok disclosure/toggles, or X partnership/AI metadata → **Cause:** direct truthiness checks such as `!!settings.flag`. **Fix:** normalize persisted provider flags through `SocialAbstract.assetBoolean`. Keep the X-specific behavior that omits `made_with_ai` and `paid_partnership` unless they are truly enabled; do not copy the upstream payload shape that always sends false values.
+15. **Symptom:** a provider failure ends as `GRPC Message too large` or bloats Temporal history instead of exposing the original API error → **Cause:** `ApplicationFailure` serializes message and details, and providers may return large HTML/base64/debug bodies. **Fix:** keep `RefreshToken` and `BadBody` routed through `truncateForTemporal` in `../social.abstract.ts` (2,000 chars for the message; 4,000 per response/body field). Short payloads and leading Meta `code`/`error_subcode` must remain byte-for-byte available. This is a size bound, not redaction: never log or persist the raw failure object in status/history surfaces.
+
+## Commands
+
+```bash
+# Spec for a specific provider
+pnpm jest libraries/nestjs-libraries/src/integrations/social/x.provider.spec.ts
+
+# Spec for the messaging tokens (System User Token validation)
+pnpm jest libraries/nestjs-libraries/src/integrations/social/instagram-messaging.service.spec.ts
+```
+
+## References
+
+- [`docs/architecture/instagram-automations.md`](../../../../../docs/architecture/instagram-automations.md) — Meta credentials, follow-gate, IG pitfalls (REQUIRED READING before changing IG)
+- [`docs/architecture/credential-validation.md`](../../../../../docs/architecture/credential-validation.md) — credential validation
+- [Zernio API docs](https://docs.zernio.com/llms-full.txt)
+- [`src/chat/CLAUDE.md`](../../chat/CLAUDE.md) — IG webhook validation (HMAC with two secrets)
+- [`apps/orchestrator/CLAUDE.md`](../../../../../apps/orchestrator/CLAUDE.md) — `FlowActivity.resolveIgRoute` wrapper

@@ -11,13 +11,17 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { timer } from '@gitroom/helpers/utils/timer';
 import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { readRequestContext } from '@gitroom/nestjs-libraries/chat/tools/tool.context.helper';
+import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.service';
+import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 
 @Injectable()
 export class IntegrationTriggerTool implements AgentToolInterface {
   constructor(
     private _integrationManager: IntegrationManager,
     private _integrationService: IntegrationService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _encryption: EncryptionService
   ) {}
   name = 'triggerTool';
 
@@ -57,16 +61,17 @@ export class IntegrationTriggerTool implements AgentToolInterface {
           z.string(),
         ]),
       }),
-      execute: async (inputData, context) => {
-        checkAuth(inputData, context);
+      execute: async (input: any, options: any) => {
+        checkAuth(input, options);
+        const requestContext = readRequestContext(options);
         const organizationId = JSON.parse(
-          (context?.requestContext as any)?.get('organization') as string
+          requestContext.get('organization') as string
         ).id;
 
         const getIntegration =
           await this._integrationService.getIntegrationById(
             organizationId,
-            inputData.integrationId
+            input.integrationId
           );
 
         if (!getIntegration) {
@@ -74,6 +79,10 @@ export class IntegrationTriggerTool implements AgentToolInterface {
             'Integration not found, use integrationList to get a valid integration id'
           );
         }
+        getIntegration.token = decryptIntegrationToken(
+          this._encryption,
+          getIntegration.token
+        );
 
         const integrationProvider = socialIntegrationList.find(
           (p) => p.identifier === getIntegration.providerIdentifier
@@ -89,13 +98,13 @@ export class IntegrationTriggerTool implements AgentToolInterface {
         if (
           // @ts-ignore
           !tools[integrationProvider.identifier].some(
-            (p) => p.methodName === inputData.methodName
+            (p) => p.methodName === input.methodName
           ) ||
           // @ts-ignore
-          !integrationProvider[inputData.methodName]
+          !integrationProvider[input.methodName]
         ) {
           throw new Error(
-            `Method "${inputData.methodName}" not found for this integration, use integrationSchema to get the callable tools`
+            `Method "${input.methodName}" not found for this integration, use integrationSchema to get the callable tools`
           );
         }
 
@@ -103,14 +112,14 @@ export class IntegrationTriggerTool implements AgentToolInterface {
         while (true) {
           try {
             // @ts-ignore
-            const load = await integrationProvider[inputData.methodName](
+            const load = await integrationProvider[input.methodName](
               getIntegration.token,
-              inputData.dataSchema.reduce(
-                (all: Record<string, string>, current: { key: string; value: string }) => ({
+              input.dataSchema.reduce(
+                (all: any, current: any) => ({
                   ...all,
                   [current.key]: current.value,
                 }),
-                {} as Record<string, string>
+                {}
               ),
               getIntegration.internalId,
               getIntegration

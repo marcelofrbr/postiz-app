@@ -11,6 +11,7 @@ import React, {
 } from 'react';
 import { useClickOutside } from '@mantine/hooks';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
+import { useProfilePermissions } from '@gitroom/frontend/hooks/use-profile-permissions';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { useModals } from '@gitroom/frontend/components/layout/new-modal';
@@ -93,6 +94,8 @@ export const Menu: FC<{
     refreshChannel,
   } = props;
   const t = useT();
+  // Visualizador nao gerencia canais — só a acao de leitura "Copiar ID".
+  const { canWrite } = useProfilePermissions();
 
   const fetch = useFetch();
   const router = useRouter();
@@ -436,7 +439,7 @@ export const Menu: FC<{
           style={{ left: show.x, top: show.y }}
           className={`fixed p-[12px] bg-newBgColorInner shadow-menu flex flex-col gap-[16px] z-[100] rounded-[8px] border border-tableBorder text-nowrap`}
         >
-          {canDisable && !findIntegration?.refreshNeeded && (
+          {canWrite && canDisable && !findIntegration?.refreshNeeded && (
             <div
               className="flex gap-[12px] items-center py-[8px] px-[10px]"
               onClick={createPost(findIntegration!)}
@@ -488,8 +491,9 @@ export const Menu: FC<{
             </div>
             <div className="text-[14px]">{t('copy_id', 'Copy Channel ID')}</div>
           </div>
-          {canDisable &&
-            findIntegration?.refreshNeeded &&
+          {canWrite &&
+            canDisable &&
+            findIntegration &&
             !findIntegration.customFields && (
               <div
                 className="flex gap-[12px] items-center py-[8px] px-[10px]"
@@ -510,11 +514,13 @@ export const Menu: FC<{
                   </svg>
                 </div>
                 <div className="text-[14px]">
-                  {t('reconnect_channel', 'Reconnect channel')}
+                  {findIntegration.refreshNeeded
+                    ? t('reconnect_channel', 'Reconnect channel')
+                    : t('force_reconnect_channel', 'Force reconnect')}
                 </div>
               </div>
             )}
-          {!!findIntegration?.isCustomFields && (
+          {canWrite && !!findIntegration?.isCustomFields && (
             <div
               className="flex gap-[12px] items-center py-[8px] px-[10px]"
               onClick={updateCredentials}
@@ -538,7 +544,7 @@ export const Menu: FC<{
               </div>
             </div>
           )}
-          {findIntegration?.additionalSettings !== '[]' && (
+          {canWrite && findIntegration?.additionalSettings !== '[]' && (
             <div
               className="flex gap-[12px] items-center py-[8px] px-[10px]"
               onClick={additionalSettings}
@@ -562,7 +568,7 @@ export const Menu: FC<{
               </div>
             </div>
           )}
-          {(canChangeProfilePicture || canChangeNickName) && (
+          {canWrite && (canChangeProfilePicture || canChangeNickName) && (
             <div
               className="flex gap-[12px] items-center py-[8px] px-[10px]"
               onClick={changeBotPicture}
@@ -592,6 +598,8 @@ export const Menu: FC<{
               </div>
             </div>
           )}
+          {canWrite && (
+          <>
           <div
             className="flex gap-[12px] items-center py-[8px] px-[10px]"
             onClick={renameChannel}
@@ -752,6 +760,8 @@ export const Menu: FC<{
             </div>
             <div className="text-[14px]">{t('delete', 'Delete')}</div>
           </div>
+          </>
+          )}
         </div>
       )}
     </div>

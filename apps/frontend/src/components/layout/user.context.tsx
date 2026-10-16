@@ -19,6 +19,11 @@ export const UserContext = createContext<
       allowTrial: boolean;
       isTrailing: boolean;
       streakSince: string | null;
+      profileId: string | null;
+      profileName: string | null;
+      profileApiKey: string | null;
+      profileRole: 'OWNER' | 'MANAGER' | 'EDITOR' | 'VIEWER' | null;
+      profileAccess: 'implicit' | 'member' | 'none' | null;
     })
 >(undefined);
 export const ContextWrapper: FC<{
@@ -27,6 +32,7 @@ export const ContextWrapper: FC<{
     tier: 'FREE' | 'STANDARD' | 'PRO' | 'ULTIMATE' | 'TEAM';
     role: 'USER' | 'ADMIN' | 'SUPERADMIN';
     publicApi: string;
+    profileApiKey: string | null;
     totalChannels: number;
   };
   children: ReactNode;

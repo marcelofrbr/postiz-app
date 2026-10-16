@@ -40,6 +40,16 @@ import { ThirdPartyController } from '@gitroom/backend/api/routes/third-party.co
 import { MonitorController } from '@gitroom/backend/api/routes/monitor.controller';
 import { NoAuthIntegrationsController } from '@gitroom/backend/api/routes/no.auth.integrations.controller';
 import { EnterpriseController } from '@gitroom/backend/api/routes/enterprise.controller';
+import { CredentialsController } from '@gitroom/backend/api/routes/credentials.controller';
+import { StatusController } from '@gitroom/backend/api/routes/status.controller';
+import { AiCredentialsController } from '@gitroom/backend/api/routes/ai-credentials.controller';
+import { AiCatalogController } from '@gitroom/backend/api/routes/ai-catalog.controller';
+import { AiTextController } from '@gitroom/backend/api/routes/ai-text.controller';
+import { AiVideoController } from '@gitroom/backend/api/routes/ai-video.controller';
+import { AiWebSearchController } from '@gitroom/backend/api/routes/ai-web-search.controller';
+import { AiModule } from '@gitroom/nestjs-libraries/ai/ai.module';
+import { ProfilesController } from '@gitroom/backend/api/routes/profiles.controller';
+import { ZernioIntegrationsController } from '@gitroom/backend/api/routes/zernio.integrations.controller';
 import { OAuthAppController } from '@gitroom/backend/api/routes/oauth-app.controller';
 import { ApprovedAppsController } from '@gitroom/backend/api/routes/approved-apps.controller';
 import {
@@ -48,6 +58,10 @@ import {
 } from '@gitroom/backend/api/routes/oauth.controller';
 import { AnnouncementsController } from '@gitroom/backend/api/routes/announcements.controller';
 import { AdminController } from '@gitroom/backend/api/routes/admin.controller';
+import { FlowsController } from '@gitroom/backend/api/routes/flows.controller';
+import { AutomationsInboxController } from '@gitroom/backend/api/routes/automations-inbox.controller';
+import { RepostController } from '@gitroom/backend/api/routes/repost.controller';
+import { IgWebhookController } from '@gitroom/backend/api/routes/ig-webhook.controller';
 import { AuthProviderManager } from '@gitroom/backend/services/auth/providers/providers.manager';
 import { GithubProvider } from '@gitroom/backend/services/auth/providers/github.provider';
 import { GoogleProvider } from '@gitroom/backend/services/auth/providers/google.provider';
@@ -73,14 +87,26 @@ const authenticatedController = [
   AutopostController,
   SetsController,
   ThirdPartyController,
+  CredentialsController,
+  StatusController,
+  AiCredentialsController,
+  AiCatalogController,
+  AiTextController,
+  AiVideoController,
+  AiWebSearchController,
+  ProfilesController,
+  ZernioIntegrationsController,
   OAuthAppController,
   ApprovedAppsController,
   OAuthAuthorizedController,
   AnnouncementsController,
   AdminController,
+  FlowsController,
+  AutomationsInboxController,
+  RepostController,
 ];
 @Module({
-  imports: [UploadModule],
+  imports: [UploadModule, AiModule],
   controllers: process.env.MCP_ONLY
     ? [
         RootController,
@@ -100,6 +126,7 @@ const authenticatedController = [
         OAuthController,
         MediaWidgetController,
         ClippingWidgetController,
+        IgWebhookController,
         ...authenticatedController,
       ],
   providers: [

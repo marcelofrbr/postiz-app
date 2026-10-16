@@ -24,9 +24,10 @@ export class SubscriptionService {
   useCredit<T>(
     organization: Organization,
     type = 'ai_images',
-    func: () => Promise<T>
+    func: () => Promise<T>,
+    profileId?: string
   ): Promise<T> {
-    return this._subscriptionRepository.useCredit(organization, type, func);
+    return this._subscriptionRepository.useCredit(organization, type, func, profileId);
   }
 
   getCode(code: string) {
@@ -397,34 +398,83 @@ export class SubscriptionService {
     return { deleted: count };
   }
 
-  async checkCredits(organization: Organization, checkType = 'ai_images') {
-    // @ts-ignore
-    const type = organization?.subscription?.subscriptionTier || 'FREE';
-
-    if (type === 'FREE') {
-      return { credits: 0 };
+  async checkCredits(
+    organization: Organization,
+    checkType = 'ai_images',
+    profile?: { id: string; isDefault: boolean; aiImageCredits: number | null; aiVideoCredits: number | null }
+  ) {
+    // Modo ilimitado: env var tem precedencia absoluta
+    const mode = process.env.AI_CREDITS_MODE ?? 'unlimited';
+    if (mode === 'unlimited') {
+      return { credits: 999999 };
     }
 
-    const checkFromMonth = this.currentPeriodStart(
+    // Perfil default tem creditos ilimitados no modo managed
+    if (profile?.isDefault) {
+      return { credits: 999999 };
+    }
+
+    // Periodo de cobranca da assinatura (mesmo criterio do resetCredits)
+    // @ts-ignore
+    const subscriptionCreatedAt = organization?.subscription?.createdAt;
+    const checkFromMonth = subscriptionCreatedAt
+      ? this.currentPeriodStart(subscriptionCreatedAt)
+      : dayjs().startOf('month');
+
+    // Minutos de clipping seguem o limite do plano (nao ha limite por perfil)
+    if (checkType === 'clipping_minutes') {
       // @ts-ignore
-      organization.subscription.createdAt
-    );
-    const imageGenerationCount =
-      checkType === 'ai_images'
-        ? pricing[type].image_generation_count
-        : checkType === 'clipping_minutes'
-        ? pricing[type].clipping_minutes
-        : pricing[type].generate_videos;
+      const type = organization?.subscription?.subscriptionTier || 'FREE';
+      if (type === 'FREE') {
+        return { credits: 0 };
+      }
+
+      const totalUse = await this._subscriptionRepository.getCreditsFrom(
+        organization.id,
+        checkFromMonth,
+        checkType
+      );
+      return { credits: pricing[type].clipping_minutes - totalUse };
+    }
+
+    // Perfil com limites individuais configurados
+    if (profile) {
+      const limit = checkType === 'ai_images' ? profile.aiImageCredits : profile.aiVideoCredits;
+      if (limit !== null && limit !== undefined) {
+        if (limit === -1) return { credits: 999999 };
+        if (limit === 0) return { credits: 0 };
+        const totalUse = await this._subscriptionRepository.getCreditsFrom(
+          organization.id,
+          checkFromMonth,
+          checkType,
+          profile.id
+        );
+        return { credits: limit - totalUse };
+      }
+    }
+
+    // Fallback: limites default via env var
+    const defaultLimit = checkType === 'ai_images'
+      ? parseInt(process.env.AI_CREDITS_DEFAULT_IMAGES ?? '-1', 10)
+      : parseInt(process.env.AI_CREDITS_DEFAULT_VIDEOS ?? '-1', 10);
+    if (defaultLimit === -1) return { credits: 999999 };
 
     const totalUse = await this._subscriptionRepository.getCreditsFrom(
       organization.id,
       checkFromMonth,
-      checkType
+      checkType,
+      profile?.id
     );
+    return { credits: defaultLimit - totalUse };
+  }
 
-    return {
-      credits: imageGenerationCount - totalUse,
-    };
+  async getUsedCredits(organizationId: string, type: string, profileId?: string) {
+    return this._subscriptionRepository.getCreditsFrom(
+      organizationId,
+      dayjs().startOf('month'),
+      type,
+      profileId
+    );
   }
 
   async addSubscription(

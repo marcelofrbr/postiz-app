@@ -5,8 +5,11 @@ import {
   HttpException,
   Param,
   Post,
+  Query,
+  Res,
   UseFilters,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { ConnectIntegrationDto } from '@gitroom/nestjs-libraries/dtos/integrations/connect.integration.dto';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -76,13 +79,15 @@ export class NoAuthIntegrationsController {
 
     const org = await this._organizationService.getOrgById(organization);
 
-    if (!integrationProvider.customFields) {
+    // For two-step providers (isBetweenSteps), keep the login state alive so
+    // that a page refresh during step-2 selection doesn't cause "Invalid state".
+    // The key expires naturally after 1 hour; the auth code itself is one-time
+    // and will be rejected by the provider on any subsequent authenticate() call.
+    if (!integrationProvider.customFields && !integrationProvider.isBetweenSteps) {
       await ioRedis.del(`login:${body.state}`);
     }
 
-    const details = integrationProvider.externalUrl
-      ? await ioRedis.get(`external:${body.state}`)
-      : undefined;
+    const details = await ioRedis.get(`external:${body.state}`) || undefined;
 
     if (details) {
       await ioRedis.del(`external:${body.state}`);
@@ -96,6 +101,11 @@ export class NoAuthIntegrationsController {
     const onboarding = await ioRedis.get(`onboarding:${body.state}`);
     if (onboarding) {
       await ioRedis.del(`onboarding:${body.state}`);
+    }
+
+    const profileId = await ioRedis.get(`profile:${body.state}`) || undefined;
+    if (profileId) {
+      await ioRedis.del(`profile:${body.state}`);
     }
 
     const {
@@ -175,7 +185,19 @@ export class NoAuthIntegrationsController {
           });
         }
 
-        console.log(`Authentication failed for ${integration}:`, err);
+        // Log full error so we can diagnose silent failures in OAuth
+        // (token-exchange errors from Meta, JSON parse failures, missing
+        // credentials, etc.) instead of swallowing them as "Authentication failed".
+        console.error(
+          `[connectSocialMedia] ${integration} authenticate() failed:`,
+          {
+            name: (err as Error)?.name,
+            message: (err as Error)?.message,
+            stack: (err as Error)?.stack,
+            cause: (err as any)?.cause,
+          }
+        );
+
         return res({
           error: 'Authentication failed',
           accessToken: '',
@@ -267,7 +289,8 @@ export class NoAuthIntegrationsController {
           ? AuthService.fixedEncryption(
               Buffer.from(body.code, 'base64').toString()
             )
-          : undefined
+          : undefined,
+        profileId
       );
 
     this._refreshIntegrationService
@@ -365,6 +388,25 @@ export class NoAuthIntegrationsController {
     return this._integrationService.saveProviderPage(org.id, id, body);
   }
 
+  @Get('/zernio/callback')
+  async zernioCallback(
+    @Query('accountId') accountId: string,
+    @Query('profileId') profileId: string,
+    @Query('platform') platform: string,
+    @Query('state') state: string,
+    @Res() res: Response
+  ) {
+    if (!accountId || !state) {
+      throw new HttpException('Missing required parameters', 400);
+    }
+
+    const provider = `zernio-${platform}`;
+
+    // Redirect to frontend with the account data
+    const redirectUrl = `${process.env.FRONTEND_URL}/integrations/social/${provider}?code=${encodeURIComponent(accountId)}&state=${encodeURIComponent(state)}`;
+    return res.redirect(redirectUrl);
+  }
+
   @Post('/extension-refresh')
   async extensionRefreshCookies(
     @Body() body: { jwt: string; cookies: string }
@@ -430,7 +472,8 @@ export class NoAuthIntegrationsController {
       undefined,
       AuthService.signJWT(
         JSON.parse(Buffer.from(body.cookies, 'base64').toString())
-      )
+      ),
+      integration.profileId || undefined
     );
 
     return { success: true };

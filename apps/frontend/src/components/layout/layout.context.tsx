@@ -5,6 +5,7 @@ import { FetchWrapperComponent } from '@gitroom/helpers/utils/custom.fetch';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { useReturnUrl } from '@gitroom/frontend/app/(app)/auth/return.url.component';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
+import i18next from '@gitroom/react/translation/i18next';
 export default function LayoutContext(params: { children: ReactNode }) {
   if (params?.children) {
     // eslint-disable-next-line react/no-children-prop
@@ -48,12 +49,18 @@ function LayoutContextInner(params: { children: ReactNode }) {
       if (showOrg) {
         setCookie('showorg', showOrg, 365);
       }
+      const showProfile =
+        response?.headers?.get('showprofile') || response?.headers?.get('Showprofile');
+      if (showProfile) {
+        setCookie('showprofile', showProfile, 365);
+      }
       if (impersonate) {
         setCookie('impersonate', impersonate, 365);
       }
       if (logout && !isSecured) {
         setCookie('auth', '', -10);
         setCookie('showorg', '', -10);
+        setCookie('showprofile', '', -10);
         setCookie('impersonate', '', -10);
         window.location.href = '/';
         return true;
@@ -84,6 +91,7 @@ function LayoutContextInner(params: { children: ReactNode }) {
         if (!isSecured) {
           setCookie('auth', '', -10);
           setCookie('showorg', '', -10);
+          setCookie('showprofile', '', -10);
           setCookie('impersonate', '', -10);
         }
         window.location.href = '/';
@@ -91,16 +99,30 @@ function LayoutContextInner(params: { children: ReactNode }) {
       if (response.status === 406) {
         if (
           await deleteDialog(
-            'You are currently on trial, in order to use the feature you must finish the trial',
-            'Finish the trial, charge me now',
-            'Trial',
-
+            i18next.t('currently_on_trial', 'You are currently on trial, in order to use the feature you must finish the trial'),
+            i18next.t('finish_trial_charge_me', 'Finish the trial, charge me now'),
+            i18next.t('trial', 'Trial'),
           )
         ) {
           window.open('/billing?finishTrial=true', '_blank');
           return false;
         }
         return false;
+      }
+
+      // Membership revogada em sessao ativa: recarrega para o gate
+      // "aguardando atribuicao de perfil" reavaliar o estado do usuario.
+      if (response.status === 403) {
+        try {
+          const body = await response.clone().json();
+          if (body?.code === 'NO_PROFILE_ASSIGNED') {
+            window.location.reload();
+            return false;
+          }
+        } catch (err) {
+          // corpo nao-JSON: segue o fluxo normal
+        }
+        return true;
       }
 
       if (response.status === 402) {
@@ -112,8 +134,8 @@ function LayoutContextInner(params: { children: ReactNode }) {
                 .json()
                 .catch(() => ({}))
             ).message,
-            'Move to billing',
-            'Payment Required'
+            i18next.t('move_to_billing', 'Move to billing'),
+            i18next.t('payment_required', 'Payment Required')
           )
         ) {
           window.open('/billing', '_blank');

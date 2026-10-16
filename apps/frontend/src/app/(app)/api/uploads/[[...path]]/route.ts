@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createReadStream, statSync } from 'fs';
-import { resolve, sep } from 'path';
+import { resolveSafeUploadFile } from '@gitroom/nestjs-libraries/upload/safe.upload.path';
+import { parseHttpByteRange } from '@gitroom/nestjs-libraries/upload/http.byte.range';
 // @ts-ignore
 import mime from 'mime';
 async function* nodeStreamToIterator(stream: any) {
@@ -28,51 +29,53 @@ export const GET = async (
     }>;
   }
 ) => {
+  if (!process.env.UPLOAD_DIRECTORY) {
+    return new NextResponse('Upload directory not configured', { status: 500 });
+  }
   const { path } = await context.params;
-  const base = resolve(process.env.UPLOAD_DIRECTORY!);
-  const filePath = resolve(base, (path ?? []).join('/'));
-  // Confine reads to UPLOAD_DIRECTORY. resolve() collapses any `..` segments
-  // (including URL-decoded ones), so this blocks every path-traversal variant.
-  if (filePath !== base && !filePath.startsWith(base + sep)) {
-    return new NextResponse('Not found', { status: 404 });
+  const filePath = resolveSafeUploadFile(
+    process.env.UPLOAD_DIRECTORY,
+    path ?? []
+  );
+  if (!filePath) {
+    return new NextResponse('File not found', { status: 404 });
   }
   const fileStats = statSync(filePath);
-  const contentType = mime.getType(filePath) || 'application/octet-stream';
-
-  // Honor ranged requests: providers that push video in chunks (TikTok,
-  // YouTube, LinkedIn, X) fetch byte windows with a Range header and reject
-  // anything but a 206, so ignoring Range breaks their uploads.
-  const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.get('range') || '');
-  const start = range ? Number(range[1]) : 0;
-  const end =
-    range && range[2]
-      ? Math.min(Number(range[2]), fileStats.size - 1)
-      : fileStats.size - 1;
-
-  if (range && (start >= fileStats.size || start > end)) {
+  const byteRange = parseHttpByteRange(
+    request.headers.get('range'),
+    fileStats.size
+  );
+  if ('unsatisfiable' in byteRange) {
     return new NextResponse(null, {
       status: 416,
-      headers: { 'Content-Range': `bytes */${fileStats.size}` },
+      headers: {
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes */${fileStats.size}`,
+      },
     });
   }
-
-  const response = createReadStream(filePath, range ? { start, end } : {});
+  const contentType = mime.getType(filePath) || 'application/octet-stream';
+  const response = byteRange.partial
+    ? createReadStream(filePath, {
+        start: byteRange.start,
+        end: byteRange.end,
+      })
+    : createReadStream(filePath);
   const iterator = nodeStreamToIterator(response);
   const webStream = iteratorToStream(iterator);
   return new Response(webStream, {
-    status: range ? 206 : 200,
+    status: byteRange.partial ? 206 : 200,
     headers: {
       'Content-Type': contentType,
-      // Set the appropriate content-type header
-      'Content-Length': (end - start + 1).toString(),
-      // Set the content-length header
-      'Last-Modified': fileStats.mtime.toUTCString(),
-      // Set the last-modified header
-      'Cache-Control': 'public, max-age=31536000, immutable', // Example cache-control header
+      'Content-Length': byteRange.length.toString(),
       'Accept-Ranges': 'bytes',
-      ...(range
-        ? { 'Content-Range': `bytes ${start}-${end}/${fileStats.size}` }
+      ...(byteRange.partial
+        ? {
+            'Content-Range': `bytes ${byteRange.start}-${byteRange.end}/${fileStats.size}`,
+          }
         : {}),
+      'Last-Modified': fileStats.mtime.toUTCString(),
+      'Cache-Control': 'public, max-age=31536000, immutable',
     },
   });
 };

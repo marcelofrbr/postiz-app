@@ -12,7 +12,8 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
-import { Organization, User } from '@prisma/client';
+import { GetProfileFromRequest } from '@gitroom/nestjs-libraries/user/profile.from.request';
+import { Organization, Profile, User } from '@prisma/client';
 import { IntegrationFunctionDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.function.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { pricing } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/pricing';
@@ -37,6 +38,11 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
+import { getOrgRole } from '@gitroom/nestjs-libraries/user/org.role';
+import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.service';
+import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -45,7 +51,10 @@ export class IntegrationsController {
     private _integrationManager: IntegrationManager,
     private _integrationService: IntegrationService,
     private _postService: PostsService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _organizationService: OrganizationService,
+    private _profileService: ProfileService,
+    private _encryption: EncryptionService
   ) {}
 
   @Post('/provider/:id/connect')
@@ -109,11 +118,14 @@ export class IntegrationsController {
   }
 
   @Get('/list')
-  async getIntegrationList(@GetOrgFromRequest() org: Organization) {
+  async getIntegrationList(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null
+  ) {
     return {
       integrations: await Promise.all(
         (
-          await this._integrationService.getIntegrationsList(org.id)
+          await this._integrationService.getIntegrationsList(org.id, profile?.id)
         ).map(async (p) => {
           const findIntegration = this._integrationManager.getSocialIntegration(
             p.providerIdentifier
@@ -150,6 +162,7 @@ export class IntegrationsController {
   @Post('/:id/settings')
   async updateProviderSettings(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Param('id') id: string,
     @Body('additionalSettings') body: string
   ) {
@@ -157,14 +170,27 @@ export class IntegrationsController {
       throw new Error('Invalid body');
     }
 
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     await this._integrationService.updateProviderSettings(org.id, id, body);
   }
   @Post('/:id/nickname')
   async setNickname(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Param('id') id: string,
     @Body() body: { name: string; picture: string }
   ) {
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     const integration = await this._integrationService.getIntegrationById(
       org.id,
       id
@@ -172,6 +198,10 @@ export class IntegrationsController {
     if (!integration) {
       throw new Error('Invalid integration');
     }
+    integration.token = decryptIntegrationToken(
+      this._encryption,
+      integration.token
+    );
 
     const manager = this._integrationManager.getSocialIntegration(
       integration.providerIdentifier
@@ -222,7 +252,8 @@ export class IntegrationsController {
     @Query('externalUrl') externalUrl: string,
     @Query('redirectUrl') redirectUrl: string,
     @Query('onboarding') onboarding: string,
-    @GetOrgFromRequest() org: Organization
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null
   ) {
     if (
       !this._integrationManager
@@ -243,17 +274,100 @@ export class IntegrationsController {
       migrateTo || integration
     );
 
-    if (integrationProvider.externalUrl && !externalUrl) {
+    const isZernioProvider = integration.startsWith('zernio-');
+
+    if (integrationProvider.externalUrl && !externalUrl && !isZernioProvider) {
       throw new Error('Missing external url');
     }
 
     try {
-      const getExternalUrl = integrationProvider.externalUrl
-        ? {
-            ...(await integrationProvider.externalUrl(externalUrl)),
-            instanceUrl: externalUrl,
+      let getExternalUrl: { client_id: string; client_secret: string; instanceUrl: string } | undefined;
+
+      if (isZernioProvider) {
+        let zernioApiKey: string | null = null;
+        if (profile?.id) {
+          zernioApiKey = await this._profileService.getDecryptedZernioApiKey(profile.id);
+          // If profile has no key, check if org shares Zernio with profiles
+          if (!zernioApiKey) {
+            const shareSettings =
+              await this._organizationService.getShareZernioWithProfiles(org.id);
+            if (shareSettings?.shareZernioWithProfiles) {
+              zernioApiKey = await this._organizationService.getDecryptedZernioApiKey(org.id);
+            }
           }
-        : undefined;
+        } else {
+          // No active profile — use org-level key
+          zernioApiKey = await this._organizationService.getDecryptedZernioApiKey(org.id);
+        }
+        if (!zernioApiKey) {
+          throw new Error('Zernio API key not configured. Go to Settings > Zernio to configure it.');
+        }
+        getExternalUrl = {
+          client_id: '',
+          client_secret: '',
+          instanceUrl: zernioApiKey,
+        };
+      } else if (integrationProvider.externalUrl) {
+        getExternalUrl = {
+          ...(await integrationProvider.externalUrl(externalUrl)),
+          instanceUrl: externalUrl,
+        };
+      }
+
+      // Look up per-workspace credentials from DB (falls back to env vars inside providers)
+      if (!getExternalUrl) {
+        const dbCreds = await this._integrationManager.getProviderCredentials(
+          integration,
+          org.id,
+          profile?.id
+        );
+        if (dbCreds) {
+          // Threads uses a separate Meta app (Threads App) with its own
+          // ID/Secret, stored under the Threads section of the Meta
+          // credentials form. Fall back to the Facebook App pair only when
+          // the workspace hasn't filled in the Threads-specific fields.
+          if (integration === 'threads') {
+            getExternalUrl = {
+              client_id: dbCreds.threadsAppId || dbCreds.clientId || '',
+              client_secret:
+                dbCreds.threadsAppSecret || dbCreds.clientSecret || '',
+              instanceUrl: '',
+            };
+          } else if (integration === 'instagram-standalone') {
+            // Instagram Login API usa o App do produto "Instagram" (Instagram
+            // App ID/Secret). Se o workspace nao preencheu os campos dedicados,
+            // cai nos campos gerais (clientId/clientSecret do Facebook) como
+            // fallback — mesmo App Meta serve se tiver os dois produtos.
+            getExternalUrl = {
+              client_id: dbCreds.instagramAppId || dbCreds.clientId || '',
+              client_secret:
+                dbCreds.instagramAppSecret || dbCreds.clientSecret || '',
+              instanceUrl: '',
+            };
+          } else {
+            getExternalUrl = {
+              client_id: dbCreds.clientId || '',
+              client_secret: dbCreds.clientSecret || '',
+              instanceUrl: '',
+            };
+          }
+        }
+      }
+
+      // Antes de redirecionar para o consent, revoga programaticamente o
+      // token antigo se o provider suportar. Isso forca a tela de consent a
+      // aparecer de novo (mesmo quando a conta ja autorizou o app), evitando
+      // que o Google emita um auth code sem refresh_token associado.
+      if (refresh && integrationProvider.revokeToken) {
+        const matches =
+          await this._integrationService.getIntegrationsByInternalId(refresh);
+        const existing = matches.find((i) => i.organizationId === org.id);
+        if (existing?.token) {
+          await integrationProvider.revokeToken(
+            decryptIntegrationToken(this._encryption, existing.token)
+          );
+        }
+      }
 
       const { codeVerifier, state, url } =
         await integrationProvider.generateAuthUrl(getExternalUrl);
@@ -279,6 +393,10 @@ export class IntegrationsController {
         3600
       );
 
+      if (profile?.id) {
+        await ioRedis.set(`profile:${state}`, profile.id, 'EX', 3600);
+      }
+
       return { url };
     } catch (err) {
       return { err: true };
@@ -288,9 +406,16 @@ export class IntegrationsController {
   @Post('/:id/time')
   async setTime(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Param('id') id: string,
     @Body() body: IntegrationTimeDto
   ) {
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     return this._integrationService.setTimes(org.id, id, body);
   }
 
@@ -362,6 +487,10 @@ export class IntegrationsController {
     if (!getIntegration) {
       throw new Error('Invalid integration');
     }
+    getIntegration.token = decryptIntegrationToken(
+      this._encryption,
+      getIntegration.token
+    );
 
     const integrationProvider = this._integrationManager.getSocialIntegration(
       getIntegration.providerIdentifier
@@ -421,31 +550,53 @@ export class IntegrationsController {
   }
 
   @Post('/disable')
-  disableChannel(
+  async disableChannel(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Body('id') id: string
   ) {
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     return this._integrationService.disableChannel(org.id, id);
   }
 
   @Post('/enable')
-  enableChannel(
+  async enableChannel(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Body('id') id: string
   ) {
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     return this._integrationService.enableChannel(
       org.id,
       // @ts-ignore
       org?.subscription?.totalChannels || pricing.FREE.channel,
-      id
+      id,
+      profile?.id
     );
   }
 
   @Delete('/')
   async deleteChannel(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Body('id') id: string
   ) {
+    await this._integrationService.validateIntegrationProfile(
+      org.id,
+      id,
+      profile?.id,
+      { requireProfile: getOrgRole(org) === 'USER' }
+    );
     const isTherePosts = await this._integrationService.getPostsForChannel(
       org.id,
       id

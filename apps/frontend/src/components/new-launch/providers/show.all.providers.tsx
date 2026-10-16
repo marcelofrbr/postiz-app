@@ -41,6 +41,10 @@ import WhopProvider from '@gitroom/frontend/components/new-launch/providers/whop
 import MeweProvider from '@gitroom/frontend/components/new-launch/providers/mewe/mewe.provider';
 import TumblrProvider from '@gitroom/frontend/components/new-launch/providers/tumblr/tumblr.provider';
 
+export const Empty: FC = () => {
+  return null;
+};
+
 export const Providers = [
   {
     identifier: 'devto',
@@ -182,6 +186,59 @@ export const Providers = [
     identifier: 'tumblr',
     component: TumblrProvider,
   },
+  // Zernio providers — reuse existing provider settings components
+  {
+    identifier: 'zernio-twitter',
+    component: XProvider,
+  },
+  {
+    identifier: 'zernio-instagram',
+    component: InstagramProvider,
+  },
+  {
+    identifier: 'zernio-tiktok',
+    component: TiktokProvider,
+  },
+  {
+    identifier: 'zernio-youtube',
+    component: YoutubeProvider,
+  },
+  {
+    identifier: 'zernio-facebook',
+    component: FacebookProvider,
+  },
+  {
+    identifier: 'zernio-linkedin',
+    component: LinkedinProvider,
+  },
+  {
+    identifier: 'zernio-pinterest',
+    component: PinterestProvider,
+  },
+  {
+    identifier: 'zernio-reddit',
+    component: RedditProvider,
+  },
+  {
+    identifier: 'zernio-bluesky',
+    component: BlueskyProvider,
+  },
+  {
+    identifier: 'zernio-threads',
+    component: ThreadsProvider,
+  },
+  {
+    identifier: 'zernio-telegram',
+    component: TelegramProvider,
+  },
+  {
+    identifier: 'zernio-googlebusiness',
+    component: GmbProvider,
+  },
+  {
+    identifier: 'zernio-snapchat',
+    component: Empty,
+  },
 ];
 export const ShowAllProviders = forwardRef((props, ref) => {
   const { date, current, global, selectedIntegrations, allIntegrations } =
@@ -264,7 +321,3 @@ export const ShowAllProviders = forwardRef((props, ref) => {
     </div>
   );
 });
-
-export const Empty: FC = () => {
-  return null;
-};

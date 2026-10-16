@@ -2,9 +2,10 @@ import {
   IsArray,
   IsDefined,
   IsIn,
-  IsNumber,
+  IsInt,
   IsOptional,
   IsString,
+  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -28,12 +29,14 @@ export class WordpressDto {
 
   @IsOptional()
   @IsArray()
-  @IsNumber({}, { each: true })
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   categories?: number[];
 
   @IsOptional()
   @IsArray()
-  @IsNumber({}, { each: true })
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   tags?: number[];
 
   @IsOptional()

@@ -1,23 +1,69 @@
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  PipeTransform,
+} from '@nestjs/common';
 import { pipeline, Readable, Transform } from 'stream';
 import { IUploadProvider } from './upload.interface';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { fileTypeStream } = require('file-type');
+import {
+  ALLOWED_UPLOAD_MIME_TYPES,
+  detectAllowedUploadMime,
+} from '@gitroom/nestjs-libraries/upload/allowed.upload.mime';
+// file-type is ESM-only, so it is loaded on first use instead of at import time
+const fileTypeStream = (stream: ReadableStream): Promise<any> =>
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  require('file-type').fileTypeStream(stream);
 
 // What users may put in the media library, whether by multipart upload or
 // from a remote URL; narrower than what storage itself accepts, no audio
-export const UPLOAD_ALLOWED_MIME = new Set<string>([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-  'image/avif',
-  'image/bmp',
-  'image/tiff',
-  'video/mp4',
-]);
+export const UPLOAD_ALLOWED_MIME = ALLOWED_UPLOAD_MIME_TYPES;
 
-export function getMaxSize(mimeType: string): number {
+@Injectable()
+export class CustomFileValidationPipe implements PipeTransform {
+  async transform(value: any) {
+    if (!value || typeof value !== 'object') {
+      return value;
+    }
+
+    // Skip non-file parameters (org, body, query, etc.)
+    if (
+      !('buffer' in value) &&
+      !('mimetype' in value) &&
+      !('fieldname' in value)
+    ) {
+      return value;
+    }
+
+    if (!value.buffer || !Buffer.isBuffer(value.buffer)) {
+      throw new BadRequestException('Invalid file upload.');
+    }
+
+    // Valida pelo conteudo real (magic bytes), nunca pelo mimetype declarado.
+    const detected = await detectAllowedUploadMime(value.buffer);
+    if (!detected) {
+      throw new BadRequestException('Unsupported file type.');
+    }
+
+    const maxSize = getMaxUploadSize(detected.mime);
+    if (value.size > maxSize) {
+      throw new BadRequestException(
+        `File size exceeds the maximum allowed size of ${maxSize} bytes.`
+      );
+    }
+
+    value.mimetype = detected.mime;
+    const safeBase =
+      (value.originalname || 'upload')
+        .replace(/\.[^./\\]*$/, '')
+        .replace(/[\\/]/g, '_')
+        .slice(0, 100) || 'upload';
+    value.originalname = `${safeBase}.${detected.ext}`;
+
+    return value;
+  }
+}
+
+export function getMaxUploadSize(mimeType: string): number {
   if (mimeType.startsWith('image/')) {
     return 10 * 1024 * 1024; // 10 MB
   } else if (mimeType.startsWith('video/')) {
@@ -26,6 +72,8 @@ export function getMaxSize(mimeType: string): number {
     throw new BadRequestException('Unsupported file type.');
   }
 }
+
+export const getMaxSize = getMaxUploadSize;
 
 // Passes bytes through and fails once they exceed maxSize, so a body with a
 // missing or lying Content-Length cannot be streamed into storage unbounded

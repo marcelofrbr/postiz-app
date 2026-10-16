@@ -6,7 +6,7 @@ import {
 } from '@langchain/core/messages';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI, DallEAPIWrapper } from '@langchain/openai';
-import { TavilySearch } from '@langchain/tavily';
+import { TavilySearchResults } from '@langchain/community/tools/tavily_search';
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import dayjs from 'dayjs';
@@ -16,10 +16,22 @@ import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/me
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { GeneratorDto } from '@gitroom/nestjs-libraries/dtos/generator/generator.dto';
 import { generationError } from '@gitroom/nestjs-libraries/openai/generation.error';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
+
+export interface PersonaData {
+  brandDescription?: string | null;
+  toneOfVoice?: string | null;
+  writingInstructions?: string | null;
+  preferredCtas?: string[];
+  contentRestrictions?: string | null;
+  imageStyle?: string | null;
+  targetAudience?: string | null;
+  examplePosts?: string[];
+}
 
 const tools = !process.env.TAVILY_API_KEY
   ? []
-  : [new TavilySearch({ maxResults: 3 })];
+  : [new TavilySearchResults({ maxResults: 3 })];
 const toolNode = new ToolNode(tools);
 
 const model = new ChatOpenAI({
@@ -36,6 +48,7 @@ const dalle = new DallEAPIWrapper({
 interface WorkflowChannelsState {
   messages: BaseMessage[];
   orgId: string;
+  profileId?: string;
   question: string;
   hook?: string;
   fresearch?: string;
@@ -52,7 +65,29 @@ interface WorkflowChannelsState {
   }[];
   isPicture?: boolean;
   popularPosts?: { content: string; hook: string }[];
+  persona?: PersonaData | null;
 }
+
+const escapeTemplateBraces = (s: string) =>
+  s.replace(/\{/g, '{{').replace(/\}/g, '}}');
+
+const renderPersonaForPrompt = (persona: PersonaData | null | undefined): string => {
+  if (!persona) return '';
+  const lines: string[] = [];
+  const esc = escapeTemplateBraces;
+  if (persona.brandDescription) lines.push(`- Brand: ${esc(persona.brandDescription)}`);
+  if (persona.targetAudience) lines.push(`- Target audience: ${esc(persona.targetAudience)}`);
+  if (persona.writingInstructions) lines.push(`- Writing instructions: ${esc(persona.writingInstructions)}`);
+  if (persona.preferredCtas?.length) {
+    lines.push(`- Preferred CTAs (use one): ${persona.preferredCtas.map(esc).join(' | ')}`);
+  }
+  if (persona.contentRestrictions) lines.push(`- Restrictions (NEVER violate): ${esc(persona.contentRestrictions)}`);
+  if (persona.examplePosts?.length) {
+    lines.push(`- Reference style from these example posts:\n${persona.examplePosts.slice(0, 3).map((p, i) => `  Example ${i + 1}: ${esc(p)}`).join('\n')}`);
+  }
+  if (!lines.length) return '';
+  return `\nProfile persona rules:\n${lines.join('\n')}`;
+};
 
 const category = z.object({
   category: z.string().describe('The category for the post'),
@@ -107,7 +142,8 @@ export class AgentGraphService {
   private storage = UploadFactory.createStorage();
   constructor(
     private _postsService: PostsService,
-    private _mediaService: MediaService
+    private _mediaService: MediaService,
+    private _profileService: ProfileService
   ) {}
   static state = () =>
     new StateGraph<WorkflowChannelsState>({
@@ -122,6 +158,7 @@ export class AgentGraphService {
         tone: null,
         question: null,
         orgId: null,
+        profileId: null,
         hook: null,
         content: null,
         date: null,
@@ -129,6 +166,7 @@ export class AgentGraphService {
         popularPosts: null,
         topic: null,
         isPicture: null,
+        persona: null,
       },
     });
 
@@ -213,19 +251,24 @@ export class AgentGraphService {
 
   async generateHook(state: WorkflowChannelsState) {
     const structuredOutput = model.withStructuredOutput(hook);
+    const personaTone = state.persona?.toneOfVoice
+      ? `${state.tone} — ${escapeTemplateBraces(state.persona.toneOfVoice)}`
+      : state.tone;
+    const personaBlock = renderPersonaForPrompt(state.persona);
     const { hook: outputHook } = await ChatPromptTemplate.fromTemplate(
       `
         You are an assistant that gets content for a social media post, and generate only the hook.
         The hook is the 1-2 sentences of the post that will be used to grab the attention of the reader.
         You will be provided existing hooks you should use as inspiration.
         - Avoid weird hook that starts with "Discover the secret...", "The best...", "The most...", "The top..."
-        - Make sure it sounds ${state.tone}
+        - Make sure it sounds ${personaTone}
         - Use ${state.tone === 'personal' ? '1st' : '3rd'} person mode
         - Make sure it's engaging
         - Don't be cringy
         - Use simple english
         - Make sure you add "\n" between the lines
         - Don't take the hook from "request of the user"
+        ${personaBlock}
 
         <!-- BEGIN request of the user -->
         {request}
@@ -257,11 +300,15 @@ export class AgentGraphService {
     const structuredOutput = model.withStructuredOutput(
       contentZod(!!state.isPicture, state.format)
     );
+    const personaTone = state.persona?.toneOfVoice
+      ? `${state.tone} — ${escapeTemplateBraces(state.persona.toneOfVoice)}`
+      : state.tone;
+    const personaBlock = renderPersonaForPrompt(state.persona);
     const { content: outputContent } = await ChatPromptTemplate.fromTemplate(
       `
         You are an assistant that gets existing hook of a social media, content and generate only the content.
         - Don't add any hashtags
-        - Make sure it sounds ${state.tone}
+        - Make sure it sounds ${personaTone}
         - Use ${state.tone === 'personal' ? '1st' : '3rd'} person mode
         - ${
           state.format === 'one_short' || state.format === 'thread_short'
@@ -284,12 +331,13 @@ export class AgentGraphService {
         
         Hook:
         {hook}
-        
+
         User request:
         {request}
-        
+
         current content information:
         {information}
+        ${personaBlock}
       `
     )
       .pipe(structuredOutput)
@@ -319,10 +367,13 @@ export class AgentGraphService {
       return {};
     }
 
+    const stylePrefix = state.persona?.imageStyle
+      ? `Style: ${state.persona.imageStyle}. `
+      : '';
     try {
       const newContent = await Promise.all(
         (state.content || []).map(async (p) => {
-          const image = await dalle.invoke(p.prompt!);
+          const image = await dalle.invoke(`${stylePrefix}${p.prompt!}`);
           return {
             ...p,
             image,
@@ -347,7 +398,9 @@ export class AgentGraphService {
           const uploadWithId = await this._mediaService.saveFile(
             state.orgId,
             name,
-            upload
+            upload,
+            undefined,
+            state.profileId
           );
 
           return {
@@ -372,10 +425,21 @@ export class AgentGraphService {
   }
 
   async postDateTime(state: WorkflowChannelsState) {
-    return { date: await this._postsService.findFreeDateTime(state.orgId) };
+    return { date: await this._postsService.findFreeDateTime(state.orgId, undefined, state.profileId) };
   }
 
-  start(orgId: string, body: GeneratorDto) {
+  async loadPersona(profileId?: string): Promise<PersonaData | null> {
+    if (!profileId) return null;
+    try {
+      const persona = await this._profileService.getPersonaForAgent(profileId);
+      return (persona as PersonaData) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async start(orgId: string, body: GeneratorDto, profileId?: string) {
+    const persona = await this.loadPersona(profileId);
     const state = AgentGraphService.state();
     const workflow = state
       .addNode('agent', this.startCall.bind(this))
@@ -416,6 +480,8 @@ export class AgentGraphService {
         format: body.format,
         tone: body.tone,
         orgId,
+        profileId,
+        persona,
       },
       {
         streamMode: 'values',

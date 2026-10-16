@@ -2,6 +2,7 @@ import {
   AnalyticsData,
   AuthTokenDetails,
   PendingCheckResponse,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -26,10 +27,11 @@ import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/s
 import { setHeartbeatDetails } from '@gitroom/nestjs-libraries/temporal/temporal.heartbeat';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 
-const clientAndYoutube = () => {
+const clientAndYoutube = (clientInformation?: ClientInformation) => {
   const client = new google.auth.OAuth2({
-    clientId: process.env.YOUTUBE_CLIENT_ID,
-    clientSecret: process.env.YOUTUBE_CLIENT_SECRET,
+    clientId: clientInformation?.client_id || process.env.YOUTUBE_CLIENT_ID,
+    clientSecret:
+      clientInformation?.client_secret || process.env.YOUTUBE_CLIENT_SECRET,
     redirectUri: `${process.env.FRONTEND_URL}/integrations/social/youtube`,
   });
 
@@ -60,6 +62,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
   identifier = 'youtube';
   name = 'YouTube';
   isBetweenSteps = true;
+  keepReconnectAuthTokens = true;
   dto = YoutubeSettingsDto;
   scopes = [
     'https://www.googleapis.com/auth/userinfo.profile',
@@ -273,8 +276,18 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
     return undefined;
   }
 
-  async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
-    const { client, oauth2 } = clientAndYoutube();
+  async refreshToken(
+    refresh_token: string,
+    clientInformation?: ClientInformation
+  ): Promise<AuthTokenDetails> {
+    // Passar clientInformation aqui e critico: o refresh_token foi emitido
+    // pelo OAuth client do workspace (Settings > Credenciais > YouTube),
+    // entao o refresh tem que usar o MESMO client_id/client_secret. Caso
+    // contrario o Google retorna invalid_grant e o orchestrator marca a
+    // integracao como `refreshNeeded` num loop infinito (usuario reconecta,
+    // proximo cron quebra de novo). Sintoma anterior: refreshToken="" no
+    // banco e mensagem "you need to reconnect" repetindo a cada hora.
+    const { client, oauth2 } = clientAndYoutube(clientInformation);
     client.setCredentials({ refresh_token });
     const { credentials } = await client.refreshAccessToken();
     const user = oauth2(client);
@@ -296,13 +309,16 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async generateAuthUrl() {
+  async generateAuthUrl(clientInformation?: ClientInformation) {
     const state = makeSecureId(7);
-    const { client } = clientAndYoutube();
+    const { client } = clientAndYoutube(clientInformation);
     return {
       url: client.generateAuthUrl({
         access_type: 'offline',
         prompt: 'consent',
+        // Sem isso o Google pode pular a tela de consent quando a conta ja
+        // autorizou o app, e nao emitir refresh_token novo.
+        include_granted_scopes: false,
         state,
         redirect_uri: `${process.env.FRONTEND_URL}/integrations/social/youtube`,
         scope: this.scopes.slice(0),
@@ -312,12 +328,37 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async authenticate(params: {
-    code: string;
-    codeVerifier: string;
-    refresh?: string;
-  }) {
-    const { client, oauth2 } = clientAndYoutube();
+  async revokeToken(accessToken: string): Promise<void> {
+    // POST https://oauth2.googleapis.com/revoke?token={token}
+    // Aceita access_token ou refresh_token. Se o token ja estiver expirado,
+    // a chamada pode falhar — ignoramos silenciosamente porque o
+    // include_granted_scopes=false + prompt=consent ja forcam novo refresh.
+    try {
+      await this.getSsrfSafeAxios().post(
+        `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(
+          accessToken
+        )}`,
+        null,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  async authenticate(
+    params: {
+      code: string;
+      codeVerifier: string;
+      refresh?: string;
+    },
+    clientInformation?: ClientInformation
+  ) {
+    const { client, oauth2 } = clientAndYoutube(clientInformation);
     const { tokens } = await client.getToken(params.code);
     client.setCredentials(tokens);
     const { scopes } = await client.getTokenInfo(tokens.access_token!);
@@ -1006,6 +1047,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
 
       return acc;
     } catch (err) {
+      console.error('Error fetching YouTube analytics:', err);
       return [];
     }
   }

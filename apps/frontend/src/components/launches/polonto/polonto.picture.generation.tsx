@@ -41,25 +41,74 @@ const GenerateTab = observer(({ store }: any) => {
       return;
     }
     if (!inputRef.current.value) {
-      toast.show('Please type your prompt', 'warning');
+      toast.show(
+        t('please_type_prompt', 'Por favor digite um prompt'),
+        'warning'
+      );
       return;
     }
     setLoading(true);
     setImage(null);
-    const req = await fetch(`/media/generate-image`, {
-      method: 'POST',
-      body: JSON.stringify({
-        prompt: inputRef.current.value,
-      }),
-    });
-    setLoading(false);
-    if (!req.ok) {
-      alert('Something went wrong, please try again later...');
-      return;
+    try {
+      const req = await fetch(`/media/generate-image`, {
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: inputRef.current.value,
+        }),
+      });
+      if (!req.ok) {
+        // Mesmo padrao de tratamento dos modais novos (ai.image, ai.video):
+        // backend ja envia message especifica do provider/resolver no
+        // detail.message. So mostramos o que vier; fallback generico
+        // se o body nao for parseavel.
+        const detail = await req.json().catch(() => ({} as any));
+        const backendMessage: string | undefined = Array.isArray(
+          detail?.message
+        )
+          ? detail.message.join(' · ')
+          : typeof detail?.message === 'string'
+          ? detail.message
+          : undefined;
+
+        if (req.status === 412 || req.status === 402) {
+          toast.show(
+            backendMessage ||
+              t(
+                'ai_image_not_configured',
+                'Configure suas chaves em Configurações > Modelos de IA'
+              ),
+            'warning'
+          );
+          return;
+        }
+        if (req.status === 429) {
+          toast.show(
+            t(
+              'ai_image_rate_limit',
+              'Você atingiu o limite. Aguarde um instante.'
+            ),
+            'warning'
+          );
+          return;
+        }
+        toast.show(
+          backendMessage ||
+            t('ai_image_generic_error', 'Erro ao gerar imagem'),
+          'warning'
+        );
+        return;
+      }
+      mutate();
+      const newData = await req.json();
+      setImage(newData.output);
+    } catch (e) {
+      toast.show(
+        t('ai_image_generic_error', 'Erro ao gerar imagem'),
+        'warning'
+      );
+    } finally {
+      setLoading(false);
     }
-    mutate();
-    const newData = await req.json();
-    setImage(newData.output);
   };
   return (
     <>
@@ -73,7 +122,7 @@ const GenerateTab = observer(({ store }: any) => {
         {data?.credits ? `(${data?.credits} left)` : ``}
       </div>
       <InputGroup
-        placeholder="Type your image generation prompt here..."
+        placeholder={t('type_image_prompt', 'Type your image generation prompt here...')}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             handleGenerate();
@@ -92,7 +141,7 @@ const GenerateTab = observer(({ store }: any) => {
           marginBottom: '40px',
         }}
       >
-        {data?.credits <= 0 ? 'Click to purchase more credits' : 'Generate'}
+        {data?.credits <= 0 ? t('click_to_purchase_credits', 'Click to purchase more credits') : t('generate', 'Generate')}
       </Button>
       {image && (
         <ImagesGrid

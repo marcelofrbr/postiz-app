@@ -37,8 +37,10 @@ import { LanguageComponent } from '@gitroom/frontend/components/layout/language.
 import { ChromeExtensionComponent } from '@gitroom/frontend/components/layout/chrome.extension.component';
 import NotificationComponent from '@gitroom/frontend/components/notifications/notification.component';
 import { OrganizationSelector } from '@gitroom/frontend/components/layout/organization.selector';
+import { ProfileSelector } from '@gitroom/frontend/components/layout/profile.selector';
 import { StreakComponent } from '@gitroom/frontend/components/layout/streak.component';
 import { PreConditionComponent } from '@gitroom/frontend/components/layout/pre-condition.component';
+import { NoProfileAssignedComponent } from '@gitroom/frontend/components/layout/no-profile-assigned.component';
 import { AttachToFeedbackIcon } from '@gitroom/frontend/components/new-layout/sentry.feedback.component';
 import { FirstBillingComponent } from '@gitroom/frontend/components/billing/first.billing.component';
 import { TrialTracker } from '@gitroom/frontend/components/layout/gtm.component';
@@ -74,6 +76,12 @@ export const LayoutComponent = ({ children }: { children: ReactNode }) => {
   }, [user]);
 
   if (!user) return null;
+
+  // Closed-by-default: org USER sem perfil atribuido nao carrega o app —
+  // ve o estado "aguardando atribuicao" ate um admin conceder um perfil.
+  if (user.role === 'USER' && !user.profileId) {
+    return <NoProfileAssignedComponent />;
+  }
 
   return (
     <ContextWrapper user={user}>
@@ -117,7 +125,7 @@ export const LayoutComponent = ({ children }: { children: ReactNode }) => {
                     )}
                     <div
                       className={clsx(
-                        'flex flex-col bg-newBgColorInner w-[80px] rounded-[12px] mobile:fixed mobile:top-0 mobile:bottom-0 mobile:start-0 mobile:z-[491] mobile:rounded-none mobile:overflow-y-auto mobile:overflow-x-hidden',
+                        'flex flex-col bg-newBgColorInner w-[96px] rounded-[12px] mobile:fixed mobile:top-0 mobile:bottom-0 mobile:start-0 mobile:z-[491] mobile:rounded-none mobile:overflow-y-auto mobile:overflow-x-hidden',
                         !menuOpen && 'mobile:hidden'
                       )}
                       onClick={() => setMenuOpen(false)}
@@ -166,6 +174,7 @@ export const LayoutComponent = ({ children }: { children: ReactNode }) => {
                           <StreakComponent />
                           <div className="w-[1px] h-[20px] bg-blockSeparator mobile:hidden" />
                           <OrganizationSelector />
+                          <ProfileSelector />
                           <div className="hover:text-newTextColor">
                             <ModeComponent />
                           </div>

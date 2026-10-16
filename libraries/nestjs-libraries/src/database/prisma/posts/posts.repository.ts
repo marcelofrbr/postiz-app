@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import {
   APPROVED_SUBMIT_FOR_ORDER,
+  CommentKind,
   CreationMethod,
   Post,
   State,
@@ -49,16 +50,59 @@ export class PostsRepository {
         state: 'QUEUE',
         deletedAt: null,
         parentPostId: null,
+        OR: [{ profileId: null }, { profile: { deletedAt: null } }],
       },
       select: {
         id: true,
         organizationId: true,
         integration: {
           select: {
+            id: true,
             providerIdentifier: true,
           },
         },
         publishDate: true,
+      },
+    });
+  }
+
+  /**
+   * Posts que falharam ao publicar (state=ERROR) nos ultimos 30 dias, para a
+   * tela de Status. Escopado por org; `profileId` opcional (drill-down futuro).
+   * Traz canal + perfil de origem embutidos. Limite defensivo: um unico canal
+   * caido gera muitos erros, entao capamos e ordenamos pelos mais recentes.
+   */
+  getErrorPosts(orgId: string, profileId?: string, limit = 50) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        parentPostId: null,
+        state: 'ERROR',
+        OR: [{ profileId: null }, { profile: { deletedAt: null } }],
+        updatedAt: { gte: dayjs.utc().subtract(30, 'day').toDate() },
+        ...(profileId ? { profileId } : {}),
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: limit,
+      select: {
+        // NAO selecionar `error`: Post.error e uma serializacao completa da
+        // excecao e pode conter refresh_token/client_secret (details[].body de
+        // RefreshToken/BadBody). A tela de Status so precisa da contagem por canal.
+        id: true,
+        updatedAt: true,
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+            internalId: true,
+            name: true,
+            picture: true,
+          },
+        },
+        profile: {
+          select: { id: true, name: true },
+        },
       },
     });
   }
@@ -152,7 +196,7 @@ export class PostsRepository {
     }
   }
 
-  async getPosts(orgId: string, query: GetPostsDto) {
+  async getPosts(orgId: string, query: GetPostsDto, profileId?: string) {
     // Use the provided start and end dates directly
     const startDate = dayjs.utc(query.startDate).toDate();
     const endDate = dayjs.utc(query.endDate).toDate();
@@ -167,6 +211,7 @@ export class PostsRepository {
               },
             ],
           },
+          ...(profileId ? [{ profileId }] : []),
           {
             OR: [
               {
@@ -221,6 +266,17 @@ export class PostsRepository {
             picture: true,
           },
         },
+        // Ultima acao de revisao do cliente (aprovar/pedir alteracao) — para o
+        // selo de status no calendario. Leve: so o registro mais recente.
+        comments: {
+          where: {
+            kind: { in: ['APPROVAL', 'CHANGE_REQUEST'] },
+            deletedAt: null,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { kind: true, createdAt: true },
+        },
       },
     });
 
@@ -249,7 +305,7 @@ export class PostsRepository {
     }, [] as any[]);
   }
 
-  async getPostsList(orgId: string, query: GetPostsListDto) {
+  async getPostsList(orgId: string, query: GetPostsListDto, profileId?: string) {
     const page = query.page || 0;
     const limit = query.limit || 20;
     const skip = page * limit;
@@ -282,6 +338,7 @@ export class PostsRepository {
             },
           ],
         },
+        ...(profileId ? [{ profileId }] : []),
       ],
       ...stateAndDate,
       // Published posts were already posted (publishDate in the past), so fetch
@@ -359,11 +416,12 @@ export class PostsRepository {
     };
   }
 
-  async deletePost(orgId: string, group: string) {
+  async deletePost(orgId: string, group: string, profileId?: string) {
     await this._post.model.post.updateMany({
       where: {
         organizationId: orgId,
         group,
+        ...(profileId ? { profileId } : {}),
       },
       data: {
         deletedAt: new Date(),
@@ -436,6 +494,9 @@ export class PostsRepository {
         id,
         ...(orgId ? { organizationId: orgId } : {}),
         deletedAt: null,
+        ...(isFirst
+          ? { OR: [{ profileId: null }, { profile: { deletedAt: null } }] }
+          : {}),
       },
       include: {
         ...(includeIntegration
@@ -467,6 +528,7 @@ export class PostsRepository {
         state: 'PUBLISHED',
         releaseURL,
         releaseId: postId,
+        error: null,
       },
     });
   }
@@ -523,6 +585,10 @@ export class PostsRepository {
         integration: {
           select: {
             providerIdentifier: true,
+            // name/picture alimentam o snapshot do StatusEvent (POST_FAILED) —
+            // emitido pelo PostsService a partir deste retorno, sem query extra.
+            name: true,
+            picture: true,
           },
         },
       },
@@ -575,6 +641,7 @@ export class PostsRepository {
               state: isDraft ? 'DRAFT' : 'QUEUE',
               releaseId: null,
               releaseURL: null,
+              error: null,
             }
           : {}),
       },
@@ -617,7 +684,8 @@ export class PostsRepository {
     keepGroup = false,
     // Shared by the posts saved together for several channels, so opening one
     // of them in the editor brings the others.
-    batchId?: string
+    batchId?: string,
+    profileId?: string
   ) {
     const posts: Post[] = [];
     const uuid = uuidv4();
@@ -692,6 +760,7 @@ export class PostsRepository {
             id: orgId,
           },
         },
+        ...(profileId ? { profile: { connect: { id: profileId } } } : {}),
       });
 
       posts.push(
@@ -968,12 +1037,14 @@ export class PostsRepository {
   async getPostsCountsByDates(
     orgId: string,
     times: number[],
-    date: dayjs.Dayjs
+    date: dayjs.Dayjs,
+    profileId?: string
   ) {
     const dates = await this._post.model.post.findMany({
       where: {
         deletedAt: null,
         organizationId: orgId,
+        ...(profileId ? { profileId } : {}),
         publishDate: {
           in: times.map((time) => {
             return date.clone().add(time, 'minutes').toDate();
@@ -1072,29 +1143,72 @@ export class PostsRepository {
     });
   }
 
-  async getTags(orgId: string) {
-    return this._tags.model.tags.findMany({
+  async getComments(postId: string, orgId?: string) {
+    return this._comments.model.comments.findMany({
       where: {
-        orgId,
+        postId,
+        ...(orgId ? { organizationId: orgId } : {}),
         deletedAt: null,
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+      select: {
+        id: true,
+        content: true,
+        userId: true,
+        guestName: true,
+        kind: true,
+        createdAt: true,
+        displayName: true,
+        parentId: true,
+        anchorStart: true,
+        anchorEnd: true,
+        anchorQuote: true,
+        resolvedAt: true,
+        // Identidade do autor só no caminho autenticado (orgId presente). O
+        // endpoint publico/guest (sem orgId) NAO expoe e-mail/nome da equipe.
+        ...(orgId ? { user: { select: { email: true, name: true } } } : {}),
       },
     });
   }
 
-  createTag(orgId: string, body: CreateTagDto) {
+  // profileId do post — usado para escopar acoes de revisao ao perfil do
+  // membro (um VIEWER de Dell so revisa posts do Dell).
+  async getPostProfileScope(orgId: string, postId: string) {
+    return this._post.model.post.findFirst({
+      where: { id: postId, organizationId: orgId, deletedAt: null },
+      select: { id: true, profileId: true },
+    });
+  }
+
+  async getTags(orgId: string, profileId?: string) {
+    return this._tags.model.tags.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        ...(profileId ? { profileId } : {}),
+      },
+    });
+  }
+
+  createTag(orgId: string, body: CreateTagDto, profileId?: string) {
     return this._tags.model.tags.create({
       data: {
         orgId,
         name: body.name,
         color: body.color,
+        ...(profileId ? { profileId } : {}),
       },
     });
   }
 
-  editTag(id: string, orgId: string, body: CreateTagDto) {
+  editTag(id: string, orgId: string, body: CreateTagDto, profileId?: string) {
     return this._tags.model.tags.update({
       where: {
         id,
+        orgId,
+        ...(profileId ? { profileId } : {}),
       },
       data: {
         name: body.name,
@@ -1103,11 +1217,12 @@ export class PostsRepository {
     });
   }
 
-  async deleteTag(id: string, orgId: string) {
+  async deleteTag(id: string, orgId: string, profileId?: string) {
     const tag = await this._tags.model.tags.update({
       where: {
         id,
         orgId,
+        ...(profileId ? { profileId } : {}),
       },
       data: {
         deletedAt: new Date(),
@@ -1128,6 +1243,7 @@ export class PostsRepository {
     userId: string | null,
     postId: string,
     content: string,
+    kind: CommentKind = 'COMMENT',
     extra: {
       displayName?: string;
       parentId?: string;
@@ -1142,6 +1258,7 @@ export class PostsRepository {
         userId,
         postId,
         content,
+        kind,
         displayName: extra.displayName ?? null,
         parentId: extra.parentId ?? null,
         anchorStart: extra.anchorStart ?? null,

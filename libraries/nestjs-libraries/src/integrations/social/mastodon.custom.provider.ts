@@ -6,7 +6,10 @@ import {
 import { MastodonProvider } from '@gitroom/nestjs-libraries/integrations/social/mastodon.provider';
 import { makeSecureId } from '@gitroom/nestjs-libraries/services/make.secure.id';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
-import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
+import {
+  getSsrfSafeDispatcher,
+  ssrfSafeFetch,
+} from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { Integration } from '@prisma/client';
 
 export class MastodonCustomProvider extends MastodonProvider {
@@ -25,7 +28,7 @@ export class MastodonCustomProvider extends MastodonProvider {
     form.append('scopes', this.scopes.join(' '));
     form.append('website', process.env.FRONTEND_URL!);
     const { client_id, client_secret, ...all } = await (
-      await fetch(url + '/api/v1/apps', {
+      await ssrfSafeFetch(url + '/api/v1/apps', {
         method: 'POST',
         body: form,
         // @ts-ignore - undici-only option; blocks SSRF to internal IPs

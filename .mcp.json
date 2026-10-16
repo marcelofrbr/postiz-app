@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "dotcontext": {
+      "command": "npx",
+      "args": ["-y", "@dotcontext/cli@latest", "mcp"]
+    },
+    "graphify": {
+      "command": "uvx",
+      "args": ["--from", "graphifyy[mcp]", "python", "-m", "graphify.serve", "graphify-out/graph.json"]
+    }
+  }
+}

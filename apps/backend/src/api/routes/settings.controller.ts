@@ -6,23 +6,38 @@ import {
   HttpException,
   Param,
   Post,
+  Put,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
-import { Organization, User } from '@prisma/client';
+import { GetProfileFromRequest } from '@gitroom/nestjs-libraries/user/profile.from.request';
+import { Organization, Profile, User } from '@prisma/client';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
 import { AddTeamMemberDto } from '@gitroom/nestjs-libraries/dtos/settings/add.team.member.dto';
 import { AdminAddTeamMemberDto } from '@gitroom/nestjs-libraries/dtos/settings/admin.add.team.member.dto';
 import { ShortlinkPreferenceDto } from '@gitroom/nestjs-libraries/dtos/settings/shortlink-preference.dto';
+import { LanguageDto } from '@gitroom/nestjs-libraries/dtos/settings/language.dto';
+import { UpdateAiCreditsDto } from '@gitroom/nestjs-libraries/dtos/settings/update.ai-credits.dto';
+import { UpdateProfilePersonaDto } from '@gitroom/nestjs-libraries/dtos/settings/update.profile-persona.dto';
 import { ApiTags } from '@nestjs/swagger';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
+import { KnowledgeService } from '@gitroom/nestjs-libraries/database/prisma/knowledge/knowledge.service';
+import { ProfileManage } from '@gitroom/nestjs-libraries/services/auth/profile-access/profile-access.decorators';
 
 @ApiTags('Settings')
 @Controller('/settings')
 export class SettingsController {
   constructor(
-    private _organizationService: OrganizationService
+    private _organizationService: OrganizationService,
+    private _profileService: ProfileService,
+    private _subscriptionService: SubscriptionService,
+    private _knowledgeService: KnowledgeService
   ) {}
 
   @Get('/team')
@@ -41,10 +56,9 @@ export class SettingsController {
   )
   async inviteTeamMember(
     @GetOrgFromRequest() org: Organization,
-    @GetUserFromRequest() user: User,
     @Body() body: AddTeamMemberDto
   ) {
-    return this._organizationService.inviteTeamMember(org, user, body);
+    return this._organizationService.inviteTeamMember(org.id, body);
   }
 
   @Post('/team/add')
@@ -73,7 +87,13 @@ export class SettingsController {
   }
 
   @Get('/shortlink')
-  async getShortlinkPreference(@GetOrgFromRequest() org: Organization) {
+  async getShortlinkPreference(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null
+  ) {
+    if (profile?.id) {
+      return this._profileService.getShortlinkPreference(profile.id);
+    }
     return this._organizationService.getShortlinkPreference(org.id);
   }
 
@@ -81,11 +101,244 @@ export class SettingsController {
   @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
   async updateShortlinkPreference(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Body() body: ShortlinkPreferenceDto
   ) {
+    if (profile?.id) {
+      return this._profileService.updateShortlinkPreference(profile.id, body.shortlink);
+    }
     return this._organizationService.updateShortlinkPreference(
       org.id,
       body.shortlink
     );
+  }
+
+  @Get('/language')
+  async getLanguage(@GetOrgFromRequest() org: Organization) {
+    return this._organizationService.getLanguage(org.id);
+  }
+
+  @Post('/language')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async updateLanguage(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: LanguageDto
+  ) {
+    return this._organizationService.updateLanguage(org.id, body.language);
+  }
+
+  @Get('/zernio')
+  async getZernioSettings(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null
+  ) {
+    if (profile?.id) {
+      return this._profileService.getZernioSettings(profile.id);
+    }
+    return this._organizationService.getZernioSettings(org.id);
+  }
+
+  @Post('/zernio')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async saveZernioApiKey(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
+    @Body('apiKey') apiKey: string
+  ) {
+    if (profile?.id) {
+      return this._profileService.saveZernioApiKey(profile.id, apiKey);
+    }
+    return this._organizationService.saveZernioApiKey(org.id, apiKey);
+  }
+
+  @Delete('/zernio')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async removeZernioApiKey(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null
+  ) {
+    if (profile?.id) {
+      return this._profileService.removeZernioApiKey(profile.id);
+    }
+    return this._organizationService.removeZernioApiKey(org.id);
+  }
+
+  @Get('/share-zernio-with-profiles')
+  async getShareZernioWithProfiles(
+    @GetOrgFromRequest() org: Organization
+  ) {
+    return this._organizationService.getShareZernioWithProfiles(org.id);
+  }
+
+  @Post('/share-zernio-with-profiles')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async updateShareZernioWithProfiles(
+    @GetOrgFromRequest() org: Organization,
+    @Body('enabled') enabled: boolean
+  ) {
+    return this._organizationService.updateShareZernioWithProfiles(org.id, enabled);
+  }
+
+  @Get('/share-provider-credentials')
+  async getShareProviderCredentials(@GetOrgFromRequest() org: Organization) {
+    return this._organizationService.getShareProviderCredentials(org.id);
+  }
+
+  @Post('/share-provider-credentials')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async updateShareProviderCredentials(
+    @GetOrgFromRequest() org: Organization,
+    @Body('enabled') enabled: boolean
+  ) {
+    return this._organizationService.updateShareProviderCredentials(
+      org.id,
+      enabled
+    );
+  }
+
+  @Get('/profiles/:profileId/ai-credits')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async getProfileAiCredits(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string
+  ) {
+    const profile = await this._profileService.getAiCredits(org.id, profileId);
+    if (!profile) {
+      throw new HttpException('Profile not found', 404);
+    }
+
+    const usedImages = await this._subscriptionService.getUsedCredits(
+      org.id, 'ai_images', profileId
+    );
+    const usedVideos = await this._subscriptionService.getUsedCredits(
+      org.id, 'ai_videos', profileId
+    );
+
+    return {
+      aiImageCredits: profile.aiImageCredits,
+      aiVideoCredits: profile.aiVideoCredits,
+      usedImages,
+      usedVideos,
+      mode: process.env.AI_CREDITS_MODE ?? 'unlimited',
+    };
+  }
+
+  @Put('/profiles/:profileId/ai-credits')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async updateProfileAiCredits(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string,
+    @Body() body: UpdateAiCreditsDto
+  ) {
+    const updated = await this._profileService.updateAiCredits(org.id, profileId, body);
+    return {
+      aiImageCredits: updated.aiImageCredits,
+      aiVideoCredits: updated.aiVideoCredits,
+    };
+  }
+
+  @Get('/ai-credits/summary')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async getAiCreditsSummary(
+    @GetOrgFromRequest() org: Organization
+  ) {
+    const profiles = await this._profileService.getAllProfilesWithCredits(org.id);
+    const profilesWithUsage = await Promise.all(
+      profiles.map(async (p) => {
+        const usedImages = await this._subscriptionService.getUsedCredits(
+          org.id, 'ai_images', p.id
+        );
+        const usedVideos = await this._subscriptionService.getUsedCredits(
+          org.id, 'ai_videos', p.id
+        );
+        return {
+          id: p.id,
+          name: p.name,
+          isDefault: p.isDefault,
+          aiImageCredits: p.aiImageCredits,
+          aiVideoCredits: p.aiVideoCredits,
+          usedImages,
+          usedVideos,
+        };
+      })
+    );
+
+    return {
+      profiles: profilesWithUsage,
+      mode: process.env.AI_CREDITS_MODE ?? 'unlimited',
+    };
+  }
+
+  // Persona e knowledge: admin da org OU OWNER/MANAGER do perfil alvo
+  // (@ProfileManage valida membership + hierarquia via ProfileAccessGuard).
+  @Get('/profiles/:profileId/persona')
+  @ProfileManage({ param: 'profileId' })
+  async getProfilePersona(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string
+  ) {
+    const persona = await this._profileService.getPersona(org.id, profileId);
+    return { persona };
+  }
+
+  @Put('/profiles/:profileId/persona')
+  @ProfileManage({ param: 'profileId' })
+  async updateProfilePersona(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string,
+    @Body() body: UpdateProfilePersonaDto
+  ) {
+    const persona = await this._profileService.upsertPersona(org.id, profileId, body);
+    return { persona };
+  }
+
+  @Delete('/profiles/:profileId/persona')
+  @ProfileManage({ param: 'profileId' })
+  async deleteProfilePersona(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string
+  ) {
+    await this._profileService.deletePersona(org.id, profileId);
+    return { success: true };
+  }
+
+  @Get('/profiles/:profileId/knowledge')
+  @ProfileManage({ param: 'profileId' })
+  async listKnowledge(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string
+  ) {
+    const documents = await this._knowledgeService.list(org.id, profileId);
+    return { documents, enabled: this._knowledgeService.enabled };
+  }
+
+  @Post('/profiles/:profileId/knowledge/upload')
+  @ProfileManage({ param: 'profileId' })
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadKnowledge(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string,
+    @UploadedFile() file: Express.Multer.File
+  ) {
+    if (!file) {
+      throw new HttpException('File required', 400);
+    }
+    const doc = await this._knowledgeService.upload(org.id, profileId, {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+      buffer: file.buffer,
+    });
+    return { document: doc };
+  }
+
+  @Delete('/profiles/:profileId/knowledge/:documentId')
+  @ProfileManage({ param: 'profileId' })
+  async deleteKnowledge(
+    @GetOrgFromRequest() org: Organization,
+    @Param('profileId') profileId: string,
+    @Param('documentId') documentId: string
+  ) {
+    return this._knowledgeService.delete(org.id, profileId, documentId);
   }
 }

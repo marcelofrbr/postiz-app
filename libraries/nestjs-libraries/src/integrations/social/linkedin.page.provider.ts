@@ -1,6 +1,7 @@
 import {
   AnalyticsData,
   AuthTokenDetails,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -12,6 +13,7 @@ import { Integration } from '@prisma/client';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 
 @Rules(
   'LinkedIn can have maximum one attachment when selecting video, when choosing a carousel on LinkedIn minimum amount of attachment must be two, and only pictures, if uploading a video, LinkedIn can have only one attachment'
@@ -94,7 +96,7 @@ export class LinkedinPageProvider
     integration: Integration,
     originalIntegration: Integration,
     postId: string,
-    information: any,
+    information: any
   ) {
     return super.addComment(
       integration,
@@ -120,12 +122,12 @@ export class LinkedinPageProvider
     );
   }
 
-  override async generateAuthUrl() {
+  override async generateAuthUrl(clientInformation?: ClientInformation) {
     const state = makeSecureId(6);
     const codeVerifier = makeSecureId(30);
-    const url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&prompt=none&client_id=${
-      process.env.LINKEDIN_CLIENT_ID
-    }&redirect_uri=${encodeURIComponent(
+    const clientId =
+      clientInformation?.client_id || process.env.LINKEDIN_CLIENT_ID;
+    const url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&prompt=none&client_id=${clientId}&redirect_uri=${encodeURIComponent(
       `${process.env.FRONTEND_URL}/integrations/social/linkedin-page`
     )}&state=${state}&scope=${encodeURIComponent(this.scopes.join(' '))}`;
     return {
@@ -207,11 +209,18 @@ export class LinkedinPageProvider
     };
   }
 
-  override async authenticate(params: {
-    code: string;
-    codeVerifier: string;
-    refresh?: string;
-  }) {
+  override async authenticate(
+    params: {
+      code: string;
+      codeVerifier: string;
+      refresh?: string;
+    },
+    clientInformation?: ClientInformation
+  ) {
+    const clientId =
+      clientInformation?.client_id || process.env.LINKEDIN_CLIENT_ID!;
+    const clientSecret =
+      clientInformation?.client_secret || process.env.LINKEDIN_CLIENT_SECRET!;
     const body = new URLSearchParams();
     body.append('grant_type', 'authorization_code');
     body.append('code', params.code);
@@ -219,8 +228,8 @@ export class LinkedinPageProvider
       'redirect_uri',
       `${process.env.FRONTEND_URL}/integrations/social/linkedin-page`
     );
-    body.append('client_id', process.env.LINKEDIN_CLIENT_ID!);
-    body.append('client_secret', process.env.LINKEDIN_CLIENT_SECRET!);
+    body.append('client_id', clientId);
+    body.append('client_secret', clientSecret);
 
     const {
       access_token: accessToken,
@@ -326,7 +335,7 @@ export class LinkedinPageProvider
     const startDate = dayjs().subtract(date, 'days').unix() * 1000;
 
     const { elements }: { elements: Root[]; paging: any } = await (
-      await fetch(
+      await this.analyticsFetch(
         `https://api.linkedin.com/v2/organizationPageStatistics?q=organization&organization=${encodeURIComponent(
           `urn:li:organization:${id}`
         )}&timeIntervals=(timeRange:(start:${startDate},end:${endDate}),timeGranularityType:DAY)`,
@@ -341,7 +350,7 @@ export class LinkedinPageProvider
     ).json();
 
     const { elements: elements2 }: { elements: Root[]; paging: any } = await (
-      await fetch(
+      await this.analyticsFetch(
         `https://api.linkedin.com/v2/organizationalEntityFollowerStatistics?q=organizationalEntity&organizationalEntity=${encodeURIComponent(
           `urn:li:organization:${id}`
         )}&timeIntervals=(timeRange:(start:${startDate},end:${endDate}),timeGranularityType:DAY)`,
@@ -356,7 +365,7 @@ export class LinkedinPageProvider
     ).json();
 
     const { elements: elements3 }: { elements: Root[]; paging: any } = await (
-      await fetch(
+      await this.analyticsFetch(
         `https://api.linkedin.com/v2/organizationalEntityShareStatistics?q=organizationalEntity&organizationalEntity=${encodeURIComponent(
           `urn:li:organization:${id}`
         )}&timeIntervals=(timeRange:(start:${startDate},end:${endDate}),timeGranularityType:DAY)`,
@@ -457,7 +466,7 @@ export class LinkedinPageProvider
 
     const { elements: shareElements }: { elements: PostShareStatElement[] } =
       await (
-        await fetch(shareStatsUrl, {
+        await this.analyticsFetch(shareStatsUrl, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'LinkedIn-Version': '202601',
@@ -473,7 +482,7 @@ export class LinkedinPageProvider
         postId
       )}`;
       socialActions = await (
-        await fetch(socialActionsUrl, {
+        await this.analyticsFetch(socialActionsUrl, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'LinkedIn-Version': '202601',
@@ -482,6 +491,9 @@ export class LinkedinPageProvider
         })
       ).json();
     } catch (e) {
+      if (e instanceof RefreshToken) {
+        throw e;
+      }
       // Social actions may not be available for all posts
     }
 

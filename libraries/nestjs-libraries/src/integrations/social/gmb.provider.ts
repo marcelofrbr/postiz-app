@@ -1,6 +1,7 @@
 import {
   AnalyticsData,
   AuthTokenDetails,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -18,11 +19,16 @@ import dayjs from 'dayjs';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { GmbSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/gmb.settings.dto';
 
-const clientAndGmb = () => {
+const clientAndGmb = (clientInformation?: ClientInformation) => {
   const client = new google.auth.OAuth2({
-    clientId: process.env.GOOGLE_GMB_CLIENT_ID || process.env.YOUTUBE_CLIENT_ID,
+    clientId:
+      clientInformation?.client_id ||
+      process.env.GOOGLE_GMB_CLIENT_ID ||
+      process.env.YOUTUBE_CLIENT_ID,
     clientSecret:
-      process.env.GOOGLE_GMB_CLIENT_SECRET || process.env.YOUTUBE_CLIENT_SECRET,
+      clientInformation?.client_secret ||
+      process.env.GOOGLE_GMB_CLIENT_SECRET ||
+      process.env.YOUTUBE_CLIENT_SECRET,
     redirectUri: `${process.env.FRONTEND_URL}/integrations/social/gmb`,
   });
 
@@ -43,6 +49,7 @@ export class GmbProvider extends SocialAbstract implements SocialProvider {
   identifier = 'gmb';
   name = 'Google My Business';
   isBetweenSteps = true;
+  keepReconnectAuthTokens = true;
   scopes = [
     'https://www.googleapis.com/auth/userinfo.profile',
     'https://www.googleapis.com/auth/userinfo.email',
@@ -133,8 +140,11 @@ export class GmbProvider extends SocialAbstract implements SocialProvider {
     return undefined;
   }
 
-  async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
-    const { client, oauth2 } = clientAndGmb();
+  async refreshToken(
+    refresh_token: string,
+    clientInformation?: ClientInformation
+  ): Promise<AuthTokenDetails> {
+    const { client, oauth2 } = clientAndGmb(clientInformation);
     client.setCredentials({ refresh_token });
     const { credentials } = await client.refreshAccessToken();
     const user = oauth2(client);
@@ -156,13 +166,14 @@ export class GmbProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async generateAuthUrl() {
+  async generateAuthUrl(clientInformation?: ClientInformation) {
     const state = makeSecureId(7);
-    const { client } = clientAndGmb();
+    const { client } = clientAndGmb(clientInformation);
     return {
       url: client.generateAuthUrl({
         access_type: 'offline',
         prompt: 'consent',
+        include_granted_scopes: false,
         state,
         redirect_uri: `${process.env.FRONTEND_URL}/integrations/social/gmb`,
         scope: this.scopes.slice(0),
@@ -172,12 +183,34 @@ export class GmbProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async authenticate(params: {
-    code: string;
-    codeVerifier: string;
-    refresh?: string;
-  }) {
-    const { client, oauth2 } = clientAndGmb();
+  async revokeToken(accessToken: string): Promise<void> {
+    try {
+      await this.getSsrfSafeAxios().post(
+        `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(
+          accessToken
+        )}`,
+        null,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+    } catch {
+      // A tela de consentimento ainda pode emitir um token novo quando o
+      // access token anterior ja expirou e nao pode mais ser revogado.
+    }
+  }
+
+  async authenticate(
+    params: {
+      code: string;
+      codeVerifier: string;
+      refresh?: string;
+    },
+    clientInformation?: ClientInformation
+  ) {
+    const { client, oauth2 } = clientAndGmb(clientInformation);
     const { tokens } = await client.getToken(params.code);
     client.setCredentials(tokens);
     const { scopes } = await client.getTokenInfo(tokens.access_token!);
@@ -212,7 +245,9 @@ export class GmbProvider extends SocialAbstract implements SocialProvider {
       if (accountsPageToken) {
         params.set('pageToken', accountsPageToken);
       }
-      const url = `https://mybusinessaccountmanagement.googleapis.com/v1/accounts${params.toString() ? `?${params}` : ''}`;
+      const url = `https://mybusinessaccountmanagement.googleapis.com/v1/accounts${
+        params.toString() ? `?${params}` : ''
+      }`;
 
       const accountsResponse = await fetch(url, {
         headers: {

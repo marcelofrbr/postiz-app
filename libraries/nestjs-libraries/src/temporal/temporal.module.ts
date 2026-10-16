@@ -1,28 +1,131 @@
+import type { Type } from '@nestjs/common';
 import { TemporalModule } from 'nestjs-temporal-core';
+import type { WorkerDefinition } from 'nestjs-temporal-core';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { emailQueues } from '@gitroom/nestjs-libraries/temporal/email.queues';
+
+type TemporalWorkerSource = {
+  identifier: string;
+  maxConcurrentJob?: number;
+};
+
+export type TemporalWorkerDefinition = WorkerDefinition & {
+  activityClasses: Array<Type<object>>;
+  autoStart: true;
+};
+
+const parseConcurrencyDivider = (value?: string): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+};
+
+export const buildTemporalWorkers = ({
+  workflowsPath,
+  activityClasses,
+  integrations,
+  excludeQueue,
+  concurrencyDivider,
+}: {
+  workflowsPath?: string;
+  activityClasses?: Array<Type<object>>;
+  integrations: TemporalWorkerSource[];
+  excludeQueue?: string;
+  concurrencyDivider?: string;
+}): TemporalWorkerDefinition[] => {
+  if (!workflowsPath) {
+    throw new Error('Temporal workers require workflowsPath');
+  }
+  if (!activityClasses) {
+    throw new Error('Temporal workers require activityClasses');
+  }
+
+  const excludedQueues = new Set(
+    (excludeQueue || '')
+      .split(',')
+      .map((queue) => queue.trim())
+      .filter(Boolean)
+  );
+  if (excludedQueues.has('main')) {
+    throw new Error('EXCLUDE_QUEUE cannot exclude the main workflow queue');
+  }
+
+  const divider = parseConcurrencyDivider(concurrencyDivider);
+
+  return [{ identifier: 'main', maxConcurrentJob: undefined }, ...integrations]
+    .filter(({ identifier }) => !identifier.includes('-'))
+    .map((integration) => ({
+      integration,
+      taskQueue: integration.identifier.split('-')[0],
+    }))
+    .filter(({ taskQueue }) => !excludedQueues.has(taskQueue))
+    .map(({ integration, taskQueue }) => {
+      const concurrency = integration.maxConcurrentJob
+        ? Math.max(1, Math.floor(integration.maxConcurrentJob / divider))
+        : undefined;
+
+      return {
+        taskQueue,
+        // Todos os workflows do fork sao iniciados na fila main. As filas de
+        // provider executam somente activities e nao precisam compilar bundle,
+        // criar isolate V8 ou manter sticky workflow cache.
+        ...(taskQueue === 'main' ? { workflowsPath } : {}),
+        activityClasses,
+        autoStart: true,
+        workerOptions: {
+          // V112 activities emit heartbeat details every 15s. Capping the SDK
+          // throttle preserves those details before a worker crash/timeout.
+          maxHeartbeatThrottleInterval: '15 seconds',
+          ...(concurrency
+            ? { maxConcurrentActivityTaskExecutions: concurrency }
+            : {}),
+        },
+      };
+    });
+};
 
 export const getTemporalModule = (
   isWorkers: boolean,
   path?: string,
-  activityClasses?: any[]
+  activityClasses?: Array<Type<object>>
 ) => {
-  // Queues this worker server should NOT run, comma-separated
-  // (e.g. EXCLUDE_QUEUE="reddit,x,twitch"). Use it to pin a queue to a single
-  // server: exclude it on every server except the one that should own it.
-  // Meant for the providers whose concurrency is too low to split (limit 1).
-  const excludeQueues = (process.env.EXCLUDE_QUEUE || '')
+  const excludedQueues = (process.env.EXCLUDE_QUEUE || '')
     .split(',')
-    .map((s) => s.trim())
+    .map((queue) => queue.trim())
     .filter(Boolean);
 
-  // How many worker servers share each (non-excluded) queue. Per-server
-  // concurrency is divided by this so the GLOBAL concurrency stays correct.
-  // 1 server => 1 (full), 2 servers => 2 (half each), 3 servers => 3, etc.
-  const divider = Math.max(
-    1,
-    Number(process.env.WORKER_CONCURRENCY_DIVIDER) || 1
-  );
+  const workers = isWorkers
+    ? [
+        ...buildTemporalWorkers({
+          workflowsPath: path,
+          activityClasses,
+          integrations: socialIntegrationList,
+          excludeQueue: process.env.EXCLUDE_QUEUE,
+          concurrencyDivider: process.env.WORKER_CONCURRENCY_DIVIDER,
+        }),
+        // Activity-only Workers for emails, rate limited server side
+        // across all workers to stay under the Resend limit
+        ...Object.values(emailQueues)
+          .filter(({ taskQueue }) => !excludedQueues.includes(taskQueue))
+          .map(({ taskQueue, perSecond }) => ({
+            taskQueue,
+            activityClasses: activityClasses!,
+            autoStart: true as const,
+            workerOptions: {
+              maxConcurrentActivityTaskExecutions: 10,
+              maxTaskQueueActivitiesPerSecond: perSecond,
+            },
+          })),
+      ]
+    : undefined;
+
+  if (workers) {
+    console.log(
+      `[temporal] workers=${workers.length} providerWorkers=activity-only ` +
+        `divider=${parseConcurrencyDivider(
+          process.env.WORKER_CONCURRENCY_DIVIDER
+        )} excludeQueues=[${process.env.EXCLUDE_QUEUE || ''}]`
+    );
+  }
 
   return TemporalModule.register({
     isGlobal: true,
@@ -36,65 +139,6 @@ export const getTemporalModule = (
     },
     taskQueue: 'main',
     logLevel: 'error',
-    ...(isWorkers
-      ? {
-          workers: [
-            ...[
-              { identifier: 'main', maxConcurrentJob: undefined },
-              ...socialIntegrationList,
-            ]
-              .filter((f) => f.identifier.indexOf('-') === -1)
-              .map((integration) => ({
-                integration,
-                taskQueue: integration.identifier.split('-')[0],
-              }))
-              .filter(({ taskQueue }) => !excludeQueues.includes(taskQueue))
-              .map(({ integration, taskQueue }) => {
-                // Split the per-provider cap across the servers sharing this
-                // queue. Floor (never below 1) so the global total never exceeds
-                // the provider's limit. Providers whose limit is smaller than the
-                // server count must be pinned via EXCLUDE_QUEUE instead.
-                const concurrency = integration.maxConcurrentJob
-                  ? Math.max(
-                      1,
-                      Math.floor(integration.maxConcurrentJob / divider)
-                    )
-                  : undefined;
-
-                // Workflows only ever run on the `main` queue; the other Workers
-                // are activity-only, so skip the workflow bundle (webpack build,
-                // workflow thread + V8 isolate, sticky cache) on them.
-                return {
-                  taskQueue,
-                  ...(taskQueue === 'main' ? { workflowsPath: path! } : {}),
-                  activityClasses: activityClasses!,
-                  autoStart: true,
-                  workerOptions: {
-                    maxConcurrentActivityTaskExecutions: concurrency || 1000000,
-                    // By default the SDK throttles heartbeat sends to 60s, so
-                    // against the workflow's heartbeatTimeout one dropped send
-                    // or a minute of event-loop lag eats most of the margin.
-                    // Sending every 15s keeps the recorded heartbeat fresh even
-                    // when individual sends fail or fire late.
-                    maxHeartbeatThrottleInterval: '15s',
-                  },
-                };
-              }),
-            // Activity-only Workers for emails, rate limited server side
-            // across all workers to stay under the Resend limit
-            ...Object.values(emailQueues)
-              .filter(({ taskQueue }) => !excludeQueues.includes(taskQueue))
-              .map(({ taskQueue, perSecond }) => ({
-                taskQueue,
-                activityClasses: activityClasses!,
-                autoStart: true,
-                workerOptions: {
-                  maxConcurrentActivityTaskExecutions: 10,
-                  maxTaskQueueActivitiesPerSecond: perSecond,
-                },
-              })),
-          ],
-        }
-      : {}),
+    ...(workers ? { workers } : {}),
   });
 };

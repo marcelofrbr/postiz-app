@@ -1,9 +1,10 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
-import { User } from '@prisma/client';
+import { Role, User } from '@prisma/client';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
 import { getCookieUrlFromDomain } from '@gitroom/helpers/subdomain/subdomain.management';
 import { HttpForbiddenException } from '@gitroom/nestjs-libraries/services/exception.filter';
 import { MastraService } from '@gitroom/nestjs-libraries/chat/mastra.service';
@@ -29,7 +30,8 @@ export const removeAuth = (res: Response) => {
 export class AuthMiddleware implements NestMiddleware {
   constructor(
     private _organizationService: OrganizationService,
-    private _userService: UsersService
+    private _userService: UsersService,
+    private _profileService: ProfileService
   ) {}
   async use(req: Request, res: Response, next: NextFunction) {
     const auth = req.headers.auth || req.cookies.auth;
@@ -81,6 +83,12 @@ export class AuthMiddleware implements NestMiddleware {
           // @ts-expect-error
           req.org = loadImpersonate.organization;
 
+          await this.resolveProfileContext(
+            req,
+            loadImpersonate.organization.id,
+            user.id,
+            loadImpersonate.organization.users[0]?.role
+          );
           setSentryUserContext({
             userId: user.id,
             email: user.email,
@@ -101,7 +109,10 @@ export class AuthMiddleware implements NestMiddleware {
         organization.find((org) => org.subscription) ||
         organization[0];
 
-      if (!organization) {
+      // Usuario sem nenhuma organizacao (estado invalido): nega de forma limpa
+      // em vez de estourar TypeError ao acessar setOrg.apiKey abaixo. O array
+      // e sempre truthy, entao a checagem antiga (`!organization`) nunca pegava.
+      if (!setOrg) {
         throw new HttpForbiddenException();
       }
 
@@ -117,6 +128,12 @@ export class AuthMiddleware implements NestMiddleware {
       // @ts-expect-error
       req.org = setOrg;
 
+      await this.resolveProfileContext(
+        req,
+        setOrg.id,
+        user.id,
+        setOrg.users[0]?.role
+      );
       setSentryUserContext({
         userId: user.id,
         email: user.email,
@@ -127,5 +144,65 @@ export class AuthMiddleware implements NestMiddleware {
       throw new HttpForbiddenException();
     }
     next();
+  }
+
+  // Resolve o contexto de perfil da requisicao. Org ADMIN/SUPERADMIN tem
+  // acesso implicito a todos os perfis da org (sem linhas de ProfileMember);
+  // org USER so acessa perfis onde possui membership. Nunca nega aqui —
+  // rotas como /user/self precisam responder mesmo sem perfil para o
+  // frontend renderizar o estado "aguardando atribuicao".
+  private async resolveProfileContext(
+    req: Request,
+    orgId: string,
+    userId: string,
+    orgRole?: Role
+  ) {
+    const request = req as Request & {
+      profile: unknown;
+      profileRole: string | null;
+      profileAccess: 'implicit' | 'member' | 'none';
+    };
+    const profileHeader = req.cookies.showprofile || req.headers.showprofile;
+    const isOrgAdmin = orgRole === 'ADMIN' || orgRole === 'SUPERADMIN';
+
+    if (isOrgAdmin) {
+      const profiles = await this._profileService.getProfilesByOrgId(orgId);
+      const setProfile =
+        (profileHeader && profiles.find((p) => p.id === profileHeader)) ||
+        profiles.find((p) => p.isDefault) ||
+        profiles[0] ||
+        null;
+      request.profile = setProfile;
+      request.profileRole = setProfile ? 'OWNER' : null;
+      request.profileAccess = 'implicit';
+      return;
+    }
+
+    const memberships = await this._profileService.getUserProfileMemberships(
+      userId,
+      orgId
+    );
+    if (!memberships.length) {
+      request.profile = null;
+      request.profileRole = null;
+      request.profileAccess = 'none';
+      return;
+    }
+
+    const profiles = await this._profileService.getProfilesByOrgId(orgId);
+    const accessibleProfiles = profiles.filter((p) =>
+      memberships.some((m) => m.profileId === p.id)
+    );
+    const setProfile =
+      (profileHeader &&
+        accessibleProfiles.find((p) => p.id === profileHeader)) ||
+      accessibleProfiles.find((p) => p.isDefault) ||
+      accessibleProfiles[0] ||
+      null;
+    request.profile = setProfile;
+    request.profileRole = setProfile
+      ? memberships.find((m) => m.profileId === setProfile.id)?.role ?? null
+      : null;
+    request.profileAccess = setProfile ? 'member' : 'none';
   }
 }

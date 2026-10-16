@@ -62,7 +62,20 @@ export type AllProvidersSettings =
   | ProviderExtension<'skool', SkoolDto>
   | ProviderExtension<'mewe', MeweDto>
   | ProviderExtension<'tumblr', TumblrDto>
-  | ProviderExtension<'whop', WhopDto>;
+  | ProviderExtension<'whop', WhopDto>
+  | ProviderExtension<'zernio-tiktok', TikTokDto>
+  | ProviderExtension<'zernio-instagram', InstagramDto>
+  | ProviderExtension<'zernio-youtube', YoutubeSettingsDto>
+  | ProviderExtension<'zernio-facebook', FacebookDto>
+  | ProviderExtension<'zernio-linkedin', LinkedinDto>
+  | ProviderExtension<'zernio-pinterest', PinterestSettingsDto>
+  | ProviderExtension<'zernio-reddit', RedditSettingsDto>
+  | ProviderExtension<'zernio-twitter', XDto>
+  | ProviderExtension<'zernio-bluesky', None>
+  | ProviderExtension<'zernio-threads', None>
+  | ProviderExtension<'zernio-telegram', None>
+  | ProviderExtension<'zernio-googlebusiness', GmbSettingsDto>
+  | ProviderExtension<'zernio-snapchat', None>;
 
 type None = NonNullable<unknown>;
 
@@ -103,6 +116,19 @@ export const allProviders = (setEmpty?: any) => {
     { value: WhopDto, name: 'whop' },
     { value: MeweDto, name: 'mewe' },
     { value: TumblrDto, name: 'tumblr' },
+    { value: TikTokDto, name: 'zernio-tiktok' },
+    { value: InstagramDto, name: 'zernio-instagram' },
+    { value: YoutubeSettingsDto, name: 'zernio-youtube' },
+    { value: FacebookDto, name: 'zernio-facebook' },
+    { value: LinkedinDto, name: 'zernio-linkedin' },
+    { value: PinterestSettingsDto, name: 'zernio-pinterest' },
+    { value: RedditSettingsDto, name: 'zernio-reddit' },
+    { value: XDto, name: 'zernio-twitter' },
+    { value: setEmpty, name: 'zernio-bluesky' },
+    { value: setEmpty, name: 'zernio-threads' },
+    { value: setEmpty, name: 'zernio-telegram' },
+    { value: GmbSettingsDto, name: 'zernio-googlebusiness' },
+    { value: setEmpty, name: 'zernio-snapchat' },
   ].filter((f) => f.value);
 };
 

@@ -7,6 +7,7 @@ type Ctx = {
   auth: any; // replace with your org type if you have it, e.g. Organization
   // a self-hosted connection: where its tool calls are relayed to
   relay?: SelfHostedInstance & { id: string };
+  profileId?: string;
 };
 
 const als = new AsyncLocalStorage<Ctx>();
@@ -29,4 +30,8 @@ export function getRequestId(): string | undefined {
 
 export function getRelay(): Ctx['relay'] {
   return als.getStore()?.relay;
+}
+
+export function getProfileId(): string | undefined {
+  return als.getStore()?.profileId;
 }

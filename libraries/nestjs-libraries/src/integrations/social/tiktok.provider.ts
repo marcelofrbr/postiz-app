@@ -2,6 +2,7 @@ import {
   AnalyticsData,
   AuthTokenDetails,
   PendingCheckResponse,
+  ClientInformation,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -338,13 +339,15 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async generateAuthUrl() {
+  async generateAuthUrl(clientInformation?: ClientInformation) {
     const state = makeSecureId(16);
+    const clientKey =
+      clientInformation?.client_id || process.env.TIKTOK_CLIENT_ID;
 
     return {
       url:
         'https://www.tiktok.com/v2/auth/authorize/' +
-        `?client_key=${process.env.TIKTOK_CLIENT_ID}` +
+        `?client_key=${clientKey}` +
         `&redirect_uri=${encodeURIComponent(
           `${
             process?.env?.FRONTEND_URL?.indexOf('https') === -1
@@ -360,14 +363,21 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async authenticate(params: {
-    code: string;
-    codeVerifier: string;
-    refresh?: string;
-  }) {
+  async authenticate(
+    params: {
+      code: string;
+      codeVerifier: string;
+      refresh?: string;
+    },
+    clientInformation?: ClientInformation
+  ) {
+    const clientKey =
+      clientInformation?.client_id || process.env.TIKTOK_CLIENT_ID!;
+    const clientSecret =
+      clientInformation?.client_secret || process.env.TIKTOK_CLIENT_SECRET!;
     const value = {
-      client_key: process.env.TIKTOK_CLIENT_ID!,
-      client_secret: process.env.TIKTOK_CLIENT_SECRET!,
+      client_key: clientKey,
+      client_secret: clientSecret,
       code: params.code,
       grant_type: 'authorization_code',
       code_verifier: params.codeVerifier,
@@ -986,7 +996,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
 
     try {
       // Get user stats (follower_count, following_count, likes_count, video_count)
-      const userStatsResponse = await fetch(
+      const userStatsResponse = await this.analyticsFetch(
         'https://open.tiktokapis.com/v2/user/info/?fields=follower_count,following_count,likes_count,video_count',
         {
           method: 'GET',
@@ -1036,7 +1046,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
       }
 
       // Get recent videos and aggregate their stats
-      const videoListResponse = await fetch(
+      const videoListResponse = await this.analyticsFetch(
         'https://open.tiktokapis.com/v2/video/list/?fields=id',
         {
           method: 'POST',
@@ -1055,7 +1065,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
         const videoIds = videos.map((v: { id: string }) => v.id);
 
         // Query video details to get engagement metrics
-        const videoQueryResponse = await fetch(
+        const videoQueryResponse = await this.analyticsFetch(
           'https://open.tiktokapis.com/v2/video/query/?fields=id,like_count,comment_count,share_count,view_count',
           {
             method: 'POST',
@@ -1113,6 +1123,9 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
 
       return result;
     } catch (err) {
+      if (err instanceof RefreshToken) {
+        throw err;
+      }
       console.error('Error fetching TikTok analytics:', err);
       return [];
     }
@@ -1246,7 +1259,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
 
     try {
       // Query video details using the video ID
-      const response = await fetch(
+      const response = await this.analyticsFetch(
         'https://open.tiktokapis.com/v2/video/query/?fields=id,like_count,comment_count,share_count,view_count',
         {
           method: 'POST',
@@ -1305,6 +1318,9 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
 
       return result;
     } catch (err) {
+      if (err instanceof RefreshToken) {
+        throw err;
+      }
       console.error('Error fetching TikTok post analytics:', err);
       return [];
     }

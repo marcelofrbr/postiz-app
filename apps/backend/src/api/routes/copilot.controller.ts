@@ -7,17 +7,22 @@ import {
   Res,
   Query,
   Param,
+  HttpException,
 } from '@nestjs/common';
 import {
   CopilotRuntime,
   OpenAIAdapter,
   copilotRuntimeNodeHttpEndpoint,
 } from '@copilotkit/runtime';
+import { Throttle } from '@nestjs/throttler';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
-import { Organization } from '@prisma/client';
+import { GetProfileFromRequest } from '@gitroom/nestjs-libraries/user/profile.from.request';
+import { Organization, Profile } from '@prisma/client';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
 import { MastraAgent } from '@ag-ui/mastra';
 import { MastraService } from '@gitroom/nestjs-libraries/chat/mastra.service';
+import { ProfileService } from '@gitroom/nestjs-libraries/database/prisma/profiles/profile.service';
+import { AiClientFactory } from '@gitroom/nestjs-libraries/ai/ai-client.factory';
 import { Request, Response } from 'express';
 import { RequestContext } from '@mastra/core/di';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
@@ -27,6 +32,8 @@ export type ChannelsContext = {
   integrations: string;
   organization: string;
   ui: string;
+  profileId?: string;
+  persona?: string;
 };
 
 // the copilot runtime writes its own CORS headers on the response, keep them aligned with main.ts
@@ -43,44 +50,109 @@ const copilotCors = () => ({
 export class CopilotController {
   constructor(
     private _subscriptionService: SubscriptionService,
-    private _mastraService: MastraService
+    private _mastraService: MastraService,
+    private _profileService: ProfileService,
+    private _aiClientFactory: AiClientFactory
   ) {}
+
+  /**
+   * Constroi o serviceAdapter do CopilotKit a partir da credencial de TEXTO
+   * configurada na UI (Configuracoes > Modelos de IA), seja OpenAI ou
+   * OpenRouter. Substitui a antiga dependencia da env var `OPENAI_API_KEY`.
+   *
+   * A construcao do cliente `openai` (SDK) e o manuseio da apiKey ficam na
+   * library (`AiClientFactory.buildOpenAiCompatibleClient`); aqui so envolvemos
+   * o cliente pronto no `OpenAIAdapter`. O `as any` cobre o gap de tipos entre
+   * o `openai` v6 do monorepo e o v4 contra o qual o adapter foi tipado.
+   */
+  private async buildServiceAdapter(
+    organizationId: string,
+    profileId?: string
+  ): Promise<OpenAIAdapter> {
+    const { client, model } =
+      await this._aiClientFactory.buildOpenAiCompatibleClient(
+        organizationId,
+        profileId
+      );
+    return new OpenAIAdapter({ openai: client as any, model });
+  }
+
+  /**
+   * Responde a request com o erro de resolucao de credencial em vez de deixar
+   * a request pendurada (o que antes gerava 504 no nginx). Credencial nao
+   * configurada/compartilhada chega como HttpException 412 de
+   * `AiProviderResolverService`.
+   */
+  private respondCredentialError(res: Response, err: unknown) {
+    const status = err instanceof HttpException ? err.getStatus() : 500;
+    const message =
+      err instanceof HttpException
+        ? err.getResponse()
+        : 'Erro ao resolver credencial de IA';
+    Logger.warn(
+      `Copilot: falha ao resolver credencial de IA (status ${status})`
+    );
+    return res.status(status).json({ message });
+  }
+
+  // Limite explicito de 30/min (o global e 30/h) — cada chamada de chat
+  // consome a credencial de IA paga do workspace. Paridade com
+  // ai-text.controller.ts.
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post('/chat')
-  chatAgent(@Req() req: Request, @Res() res: Response) {
-    if (
-      process.env.OPENAI_API_KEY === undefined ||
-      process.env.OPENAI_API_KEY === ''
-    ) {
-      Logger.warn('OpenAI API key not set, chat functionality will not work');
-      return;
+  @CheckPolicies([AuthorizationActions.Create, Sections.AI])
+  async chatAgent(
+    @Req() req: Request,
+    @Res() res: Response,
+    @GetOrgFromRequest() organization: Organization,
+    @GetProfileFromRequest() profile: Profile | null
+  ) {
+    // Passa profile?.id para respeitar o gate shareDefault do resolver:
+    // perfil secundario sem chave propria e sem compartilhamento -> 412
+    // (mesma regra do /copilot/agent).
+    let serviceAdapter: OpenAIAdapter;
+    try {
+      serviceAdapter = await this.buildServiceAdapter(
+        organization?.id,
+        profile?.id
+      );
+    } catch (err) {
+      return this.respondCredentialError(res, err);
     }
 
     const copilotRuntimeHandler = copilotRuntimeNodeHttpEndpoint({
       endpoint: '/copilot/chat',
       cors: copilotCors(),
       runtime: new CopilotRuntime(),
-      serviceAdapter: new OpenAIAdapter({
-        model: 'gpt-4.1',
-      }),
+      serviceAdapter,
     });
 
     return copilotRuntimeHandler(req, res);
   }
 
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post('/agent')
   @CheckPolicies([AuthorizationActions.Create, Sections.AI])
   async agent(
     @Req() req: Request,
     @Res() res: Response,
-    @GetOrgFromRequest() organization: Organization
+    @GetOrgFromRequest() organization: Organization,
+    @GetProfileFromRequest() profile: Profile | null
   ) {
-    if (
-      process.env.OPENAI_API_KEY === undefined ||
-      process.env.OPENAI_API_KEY === ''
-    ) {
-      Logger.warn('OpenAI API key not set, chat functionality will not work');
-      return;
+    // Resolve a credencial da UI (OpenAI/OpenRouter) ANTES de montar o runtime.
+    // Falha de credencial responde 412 aqui em vez de deixar a request pendurar
+    // (o que antes gerava 504 no nginx). O adapter em si nao faz a inferencia do
+    // agente (o Mastra faz), mas o CopilotRuntime exige um serviceAdapter valido.
+    let serviceAdapter: OpenAIAdapter;
+    try {
+      serviceAdapter = await this.buildServiceAdapter(
+        organization.id,
+        profile?.id
+      );
+    } catch (err) {
+      return this.respondCredentialError(res, err);
     }
+
     const mastra = await this._mastraService.mastra();
     const requestContext = new RequestContext<ChannelsContext>();
     requestContext.set(
@@ -90,6 +162,29 @@ export class CopilotController {
 
     requestContext.set('organization', JSON.stringify(organization));
     requestContext.set('ui', 'true');
+
+    // Per-profile credenciais e persona — sem isso o agente usa apenas
+    // o default workspace e ignora a persona configurada em
+    // Settings > Persona de IA, fazendo o tom de voz, restricoes e CTAs
+    // sumirem mesmo quando o usuario preencheu tudo.
+    if (profile?.id) {
+      requestContext.set('profileId', profile.id);
+      try {
+        const persona = await this._profileService.getPersonaForAgent(
+          profile.id
+        );
+        if (persona) {
+          requestContext.set('persona', JSON.stringify(persona));
+        }
+      } catch (err) {
+        // Best-effort: persona quebrada nao deve bloquear o chat.
+        Logger.warn(
+          `Falha ao carregar persona do profile ${profile.id}: ${
+            (err as Error).message
+          }`
+        );
+      }
+    }
 
     const agents = MastraAgent.getLocalAgents({
       resourceId: organization.id,
@@ -105,9 +200,8 @@ export class CopilotController {
       endpoint: '/copilot/agent',
       cors: copilotCors(),
       runtime,
-      serviceAdapter: new OpenAIAdapter({
-        model: 'gpt-4.1',
-      }),
+      // properties: req.body.variables.properties,
+      serviceAdapter,
     });
 
     return copilotRuntimeHandler(req, res);
@@ -130,17 +224,36 @@ export class CopilotController {
   async getMessagesList(
     @GetOrgFromRequest() organization: Organization,
     @Param('thread') threadId: string
-  ): Promise<any> {
+  ): Promise<{ uiMessages: Array<{ role: string; content: string }> }> {
     const mastra = await this._mastraService.mastra();
     const memory = await mastra.getAgent('postiz').getMemory();
     try {
-      return await memory.recall({
+      const recalled: any = await memory.recall({
         resourceId: organization.id,
         threadId,
       });
+      // Mastra v1.21+ retorna { messages, total, ... }; versoes antigas
+      // retornavam { uiMessages, messages, ... }. Normalizamos aqui pra
+      // manter o contrato simples com o frontend (uiMessages = lista
+      // sequencial de {role, content} pronta pra render).
+      const rawMessages: any[] = Array.isArray(recalled?.uiMessages)
+        ? recalled.uiMessages
+        : Array.isArray(recalled?.messages)
+        ? recalled.messages
+        : [];
+      return {
+        uiMessages: rawMessages
+          .map((m) => normalizeMessageForUi(m))
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .filter((m) => m.content && m.content.trim().length > 0),
+      };
     } catch (err) {
-      Logger.warn(`Could not recall messages for thread ${threadId}: ${err}`);
-      return { messages: [] };
+      Logger.warn(
+        `Falha ao carregar mensagens do thread ${threadId}: ${
+          (err as Error).message
+        }`
+      );
+      return { uiMessages: [] };
     }
   }
 
@@ -163,4 +276,52 @@ export class CopilotController {
       })),
     };
   }
+}
+
+/**
+ * Mensagens vindas de `memory.recall()` do Mastra podem ter `content`
+ * em varios formatos:
+ *  - string simples (V1)
+ *  - array de parts: `[{ type: 'text', text: '...' }, { type: 'tool-call', ... }]`
+ *  - objeto com `parts` aninhado
+ *
+ * Aqui extraimos somente o texto agregado, descartando partes nao-texto
+ * (tool-calls, imagens). O frontend usa `TextMessage({ content, role })`,
+ * entao nao precisamos preservar a estrutura de parts.
+ */
+function normalizeMessageForUi(m: any): { role: string; content: string } {
+  const role = String(m?.role ?? '');
+  const raw = m?.content;
+
+  if (typeof raw === 'string') {
+    return { role, content: raw };
+  }
+
+  if (Array.isArray(raw)) {
+    const text = raw
+      .map((part: any) => {
+        if (typeof part === 'string') return part;
+        if (part?.type === 'text' && typeof part.text === 'string') {
+          return part.text;
+        }
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+    return { role, content: text };
+  }
+
+  if (raw && typeof raw === 'object' && Array.isArray(raw.parts)) {
+    const text = raw.parts
+      .map((part: any) =>
+        part?.type === 'text' && typeof part.text === 'string'
+          ? part.text
+          : ''
+      )
+      .filter(Boolean)
+      .join('\n');
+    return { role, content: text };
+  }
+
+  return { role, content: '' };
 }

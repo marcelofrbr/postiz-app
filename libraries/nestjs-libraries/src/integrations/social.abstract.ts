@@ -9,6 +9,7 @@ import { setHeartbeatDetails } from '@gitroom/nestjs-libraries/temporal/temporal
 import {
   getSsrfSafeAxios,
   getSsrfSafeDispatcher,
+  ssrfSafeFetch,
 } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import sharp from 'sharp';
 import { createReadStream, readFileSync, statSync } from 'fs';
@@ -46,6 +47,18 @@ export type ValidityMedia = {
 // the failure to keep the history small and avoid "GRPC Message too large".
 const MAX_FAILURE_MESSAGE = 2_000;
 const MAX_FAILURE_FIELD = 4_000;
+
+export function heartbeatEndpoint(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'unsupported-url';
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return 'invalid-url';
+  }
+}
 
 export function truncateForTemporal(value: any, max: number): string {
   if (value === null || value === undefined) {
@@ -155,6 +168,7 @@ function safeStringify(obj: any) {
 export abstract class SocialAbstract {
   abstract identifier: string;
   maxConcurrentJob = 1;
+  hiddenFromList = false;
 
   public handleErrors(
     body: string,
@@ -246,7 +260,7 @@ export abstract class SocialAbstract {
     return getSsrfSafeAxios();
   }
 
-  protected assetBoolean(value: boolean | string) {
+  protected assetBoolean(value: boolean | string | undefined) {
     if (typeof value === 'string') {
       return value.toLowerCase() === 'true';
     }
@@ -528,6 +542,16 @@ export abstract class SocialAbstract {
     try {
       value = await func();
     } catch (err) {
+      // Log cru do erro antes de passar por handleErrors — caso contrario
+      // o wrapper do runInConcurrent joga fora o stack e a mensagem original
+      // do provider (ex.: resposta da API do X/Twitter), dificultando
+      // diagnosticar falhas no worker do Temporal. Divergencia documentada
+      // em .claude/skills/sync-upstream/SKILL.md.
+      console.error(
+        '[runInConcurrent] provider error:',
+        (err as any)?.data || (err as any)?.message || err,
+        (err as any)?.stack || ''
+      );
       const handle = this.handleErrors(safeStringify(err), 200);
       value = { err: true, value: 'Unknown Error', ...(handle || {}) };
       globalErr = err;
@@ -569,17 +593,10 @@ export abstract class SocialAbstract {
     ignoreConcurrency = false,
     message = ''
   ): Promise<Response> {
-    // A platform that accepts the connection and then goes silent leaves the
-    // activity with nothing logged until startToCloseTimeout. Record the call
-    // first so the timeout failure names it. Query string is dropped - some
-    // providers carry access_token there and details are stored by Temporal.
-    setHeartbeatDetails(`fetch ${stripQuery(url)}`);
-
-    const request = await fetch(url, {
-      ...options,
-      // @ts-ignore - undici-only option, not in the lib.dom RequestInit type
-      dispatcher: (options as any).dispatcher ?? getSsrfSafeDispatcher(),
-    });
+    // Query strings may contain access tokens. Persist only the endpoint path
+    // as Temporal heartbeat diagnostic data.
+    setHeartbeatDetails(`fetch ${heartbeatEndpoint(url)}`);
+    const request = await ssrfSafeFetch(url, options);
 
     if (request.status === 200 || request.status === 201) {
       return request;
@@ -657,6 +674,41 @@ export abstract class SocialAbstract {
       options.body!,
       handleError?.value || 'Unknown Error'
     );
+  }
+
+  // Analytics must not inherit posting retries/BadBody, but RefreshToken is
+  // kept so the service layer can renew or self-heal the integration.
+  protected async analyticsFetch(
+    url: string,
+    options: RequestInit = {}
+  ): Promise<Response> {
+    const request = await ssrfSafeFetch(url, options);
+
+    if (request.status === 200 || request.status === 201) {
+      return request;
+    }
+
+    let body = '{}';
+    try {
+      body = await request.clone().text();
+    } catch (err) {
+      body = '{}';
+    }
+
+    const handleError = this.handleErrors(body, request.status);
+    if (
+      handleError?.type === 'refresh-token' ||
+      (request.status === 401 && !handleError)
+    ) {
+      throw new RefreshToken(
+        '',
+        body,
+        options.body || '{}',
+        handleError?.value
+      );
+    }
+
+    return request;
   }
 
   checkScopes(required: string[], got: string | string[]) {

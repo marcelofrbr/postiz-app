@@ -19,15 +19,18 @@ import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import clsx from 'clsx';
 import copy from 'copy-to-clipboard';
 import { capitalize } from 'lodash';
+import { ZernioAccountModal } from '@gitroom/frontend/components/launches/zernio/zernio-account-modal';
+import { ZernioInviteModal } from '@gitroom/frontend/components/launches/zernio/zernio-invite-modal';
 const resolver = classValidatorResolver(ApiKeyDto);
 
 export const useAddProvider = (update?: () => void, invite?: boolean) => {
   const modal = useModals();
   const fetch = useFetch();
+  const t = useT();
   return useCallback(async () => {
     const data = await (await fetch('/integrations')).json();
     modal.openModal({
-      title: 'Add Channel',
+      title: t('top_title_add_channel', 'Add Channel'),
       withCloseButton: true,
       children: (
         <AddProviderComponent invite={!!invite} update={update} {...data} />
@@ -74,7 +77,7 @@ export const AddProviderButton: FC<{
         onClick={invite}
         data-tooltip-id="tooltip"
         data-tooltip-content={t(
-          'invite_link',
+          'send_invite_link_tooltip',
           'Send Invite Link to a customer to add channel'
         )}
         className="group-[.sidebar]:hidden min-h-[44px] min-w-[44px] bg-btnSimple justify-center items-center flex rounded-[8px] cursor-pointer"
@@ -121,7 +124,7 @@ export const UrlModal: FC<{
   }, []);
   return (
     <div className="rounded-[4px] border border-customColor6 bg-sixth px-[16px] pb-[16px] relative">
-      <TopTitle title={`Instance URL`} />
+      <TopTitle title={t('label_instance_url', 'Instance URL')} />
       <button
         onClick={close}
         className="outline-none absolute end-[20px] top-[20px] mantine-UnstyledButton-root mantine-ActionIcon-root hover:bg-tableBorder cursor-pointer mantine-Modal-close mantine-1dcetaa"
@@ -241,12 +244,14 @@ export const CustomVariables: FC<{
             <div key={variable.key}>
               {variable.hint ? (
                 <div className="flex flex-col gap-[6px]">
-                  <div className="text-[14px] flex items-center gap-[6px]">
+                  <div className="flex items-center gap-[6px] text-[14px]">
                     <span>{variable.label}</span>
                     <span
+                      aria-label={t(variable.hint, variable.hint)}
+                      className="flex h-[16px] w-[16px] cursor-help select-none items-center justify-center rounded-full border border-textColor/60 text-[11px] leading-none text-textColor/60"
+                      data-tooltip-content={t(variable.hint, variable.hint)}
                       data-tooltip-id="tooltip"
-                      data-tooltip-content={variable.hint}
-                      className="w-[16px] h-[16px] rounded-full border border-textColor/60 text-textColor/60 flex items-center justify-center text-[11px] leading-none cursor-help select-none"
+                      role="img"
                     >
                       i
                     </span>
@@ -345,11 +350,10 @@ const ChromeExtensionWarning: FC<{
           )}
         </li>
         <li>
-          We will store your cookies securely to facilitate the connection.
+          {t('extension_warning_cookies', 'We will store your cookies securely to facilitate the connection.')}
         </li>
         <li>
-          Postiz does not take responsibility for any issues arising or account
-          termination due to the use of this method.
+          {t('extension_warning_responsibility', 'Postiz does not take responsibility for any issues arising or account termination due to the use of this method.')}
         </li>
       </ul>
       <div className="flex gap-[10px] mt-[8px]">
@@ -430,6 +434,44 @@ export const AddProviderComponent: FC<{
         }>
       ) =>
       async () => {
+        if (invite && identifier === 'zernio') {
+          modal.openModal({
+            title: t('zernio_invite_link', 'Zernio - Invite Link'),
+            withCloseButton: true,
+            children: (
+              <ZernioInviteModal
+                onComplete={(url) => {
+                  toaster.show(
+                    t(
+                      'invite_link_copied_zernio',
+                      'Invite link copied! After the client connects, the account will be available in Add Channel > Zernio.'
+                    ),
+                    'success'
+                  );
+                  modal.closeAll();
+                  copy(url);
+                }}
+              />
+            ),
+          });
+          return;
+        }
+
+        if (identifier === 'zernio') {
+          modal.openModal({
+            title: 'Zernio',
+            withCloseButton: true,
+            children: (
+              <ZernioAccountModal
+                onComplete={() => {
+                  modal.closeAll();
+                  update?.();
+                }}
+              />
+            ),
+          });
+          return;
+        }
         const onboardingParam = onboarding ? 'onboarding=true' : '';
         const openWeb3 = async () => {
           const { component: Web3Providers } = web3List.find(
@@ -502,7 +544,7 @@ export const AddProviderComponent: FC<{
 
           if (invite) {
             toaster.show(
-              'Invite link copied to clipboard, link will be available for 1 hour',
+              t('invite_link_copied', 'Invite link copied to clipboard, link will be available for 1 hour'),
               'success'
             );
             modal.closeAll();
@@ -641,7 +683,7 @@ export const AddProviderComponent: FC<{
         }
         if (isExternal) {
           modal.openModal({
-            title: 'URL',
+            title: t('label_url', 'URL'),
             withCloseButton: true,
             ...(isMobile ? { removeLayout: true, fullScreen: true } : {}),
             classNames: {
@@ -719,7 +761,7 @@ export const AddProviderComponent: FC<{
                 {...(!!item.toolTip
                   ? {
                       'data-tooltip-id': 'tooltip',
-                      'data-tooltip-content': item.toolTip,
+                      'data-tooltip-content': t(`tooltip_${item.identifier}`, item.toolTip),
                     }
                   : {})}
                 className={clsx(

@@ -31,6 +31,7 @@ import 'dayjs/locale/tr';
 import 'dayjs/locale/vi';
 import localizedFormat from 'dayjs/plugin/localizedFormat';
 import { useModals } from '@gitroom/frontend/components/layout/new-modal';
+import { ReviewLinksModal } from '@gitroom/frontend/components/launches/review-links.modal';
 import clsx from 'clsx';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { ExistingDataContextProvider } from '@gitroom/frontend/components/launches/helpers/use.existing.data';
@@ -40,10 +41,12 @@ import { useAddProvider } from '@gitroom/frontend/components/launches/add.provid
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { useUser } from '@gitroom/frontend/components/layout/user.context';
+import { useProfilePermissions } from '@gitroom/frontend/hooks/use-profile-permissions';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { groupBy, sortBy } from 'lodash';
 import SafeImage from '@gitroom/react/helpers/safe.image';
+import { PlatformIconBadge, getPlatformIconPath } from '@gitroom/frontend/components/launches/helpers/platform-icon.helper';
 import { extend } from 'dayjs';
 import { isUSCitizen } from './helpers/isuscitizen.utils';
 import { StatisticsModal } from '@gitroom/frontend/components/launches/statistics';
@@ -775,6 +778,7 @@ export const CalendarColumn: FC<{
 
   const { getDate, randomHour } = props;
   const user = useUser();
+  const { canWrite } = useProfilePermissions();
   const {
     integrations,
     posts,
@@ -788,6 +792,7 @@ export const CalendarColumn: FC<{
   } = useCalendar();
   const modal = useModals();
   const fetch = useFetch();
+  const toaster = useToaster();
 
   // Use shared post actions hook
   const { editPost, deletePost, copyDebugJson, openStatistics, openMissingRelease, openPost } = usePostActions();
@@ -885,7 +890,7 @@ export const CalendarColumn: FC<{
                           resolve('schedule');
                         }}
                       >
-                        {t('reschedule_post', 'Reschedule the post')}
+                        {t('republish_the_post', 'Republish the post')}
                       </Button>
                     </div>
                   </div>
@@ -902,10 +907,7 @@ export const CalendarColumn: FC<{
         action = whatToDo;
       }
 
-      if (!item.interval) {
-        changeDate(item.id, getDate);
-      }
-      const { status } = await fetch(`/posts/${item.id}/date`, {
+      const response = await fetch(`/posts/${item.id}/date`, {
         method: 'PUT',
         body: JSON.stringify({
           date: getDate.utc().format('YYYY-MM-DDTHH:mm:ss'),
@@ -915,12 +917,22 @@ export const CalendarColumn: FC<{
           ...(action === 'schedule' ? { republish: true } : {}),
         }),
       });
-      if (status !== 500) {
-        if (item.interval || action === 'schedule') {
-          reloadCalendarView();
-          return;
-        }
+
+      if (!response.ok) {
+        const { message } = await response.json().catch(() => ({} as any));
+        toaster.show(
+          (Array.isArray(message) ? message[0] : message) ||
+            t('could_not_save_post', 'Could not save the post.'),
+          'warning'
+        );
         return;
+      }
+
+      if (!item.interval) {
+        changeDate(item.id, getDate);
+      }
+      if (item.interval || action === 'schedule') {
+        reloadCalendarView();
       }
     },
     collect: (monitor) => ({
@@ -1048,6 +1060,10 @@ export const CalendarColumn: FC<{
             // the "Date passed" hint is wider than a phone month cell
             display === 'month' && 'mobile:before:hidden'
           )}
+          {...(isBeforeNow && postList.length === 0 && {
+            'data-date-passed': t('date_passed', 'Date passed'),
+          }
+          )}
         >
           {loading && (
             <div className="h-full w-full p-[5px] animate-pulse absolute left-0 top-0 z-[50]">
@@ -1114,7 +1130,7 @@ export const CalendarColumn: FC<{
             </div>
           )}
         </div>
-        {!isBeforeNow && (
+        {!isBeforeNow && canWrite && (
           <div
             className="pb-[2.5px] px-[5px] flex-1 flex"
             onClick={integrations.length ? addModal : addProvider}
@@ -1164,21 +1180,11 @@ export const CalendarColumn: FC<{
                           width={32}
                           height={32}
                         />
-                        {selectedIntegrations.identifier === 'youtube' ? (
-                          <img
-                            src="/icons/platforms/youtube.svg"
-                            className="absolute z-10 -bottom-[5px] -end-[5px]"
-                            width={20}
-                          />
-                        ) : (
-                          <SafeImage
-                            src={`/icons/platforms/${selectedIntegrations.identifier}.png`}
-                            className="rounded-[8px] absolute z-10 -bottom-[5px] -end-[5px] border border-fifth"
-                            alt={selectedIntegrations.identifier}
-                            width={20}
-                            height={20}
-                          />
-                        )}
+                        <PlatformIconBadge
+                          identifier={selectedIntegrations.identifier}
+                          size={20}
+                          className="rounded-[8px] absolute z-10 -bottom-[5px] -end-[5px] border border-fifth"
+                        />
                       </div>
                     </div>
                   ))}
@@ -1213,6 +1219,7 @@ const CalendarItem: FC<{
   };
 }> = memo((props) => {
   const t = useT();
+  const { canWrite } = useProfilePermissions();
   const {
     editPost,
     statistics,
@@ -1234,9 +1241,23 @@ const CalendarItem: FC<{
     user?.impersonate &&
     post.creationMethod &&
     post.creationMethod !== 'UNKNOWN';
+  const modals = useModals();
+  // Revisao unificada na pagina /p/:id (post na integra + aprovar/comentar). O
+  // Visualizador nao recebe ?share (sem botao de compartilhar link); a agencia
+  // recebe, para tambem gerar o link externo.
   const preview = useCallback(() => {
-    window.open(`/p/` + post.id + '?share=true', '_blank');
-  }, [post]);
+    window.open(`/p/${post.id}${canWrite ? '?share=true' : ''}`, '_blank');
+  }, [post.id, canWrite]);
+  const openReviewLinks = useCallback(() => {
+    modals.openModal({
+      id: `review-links-${post.id}`,
+      title: t('client_review_links', 'Links de revisão do cliente'),
+      size: 640,
+      children: <ReviewLinksModal postId={post.id} />,
+    });
+  }, [post.id, modals, t]);
+  const reviewStatus: 'APPROVAL' | 'CHANGE_REQUEST' | null =
+    (post as any)?.comments?.[0]?.kind ?? null;
   const [{ opacity }, dragRef] = useDrag(
     () => ({
       type: 'post',
@@ -1337,6 +1358,37 @@ const CalendarItem: FC<{
               <OpenPost />
             </div>
           )}{' '}
+        {canWrite && (
+          <div
+            className={clsx(
+              'hidden group-hover:block hover:underline cursor-pointer',
+              post?.tags?.[0]?.tag?.color && 'mix-blend-difference'
+            )}
+            onClick={duplicatePost}
+          >
+            <Duplicate />
+          </div>
+        )}
+        <div
+          className={clsx(
+            'hidden group-hover:block hover:underline cursor-pointer',
+            post?.tags?.[0]?.tag?.color && 'mix-blend-difference'
+          )}
+          onClick={preview}
+        >
+          <Preview />
+        </div>{' '}
+        {canWrite && (
+          <div
+            className={clsx(
+              'hidden group-hover:block hover:underline cursor-pointer',
+              post?.tags?.[0]?.tag?.color && 'mix-blend-difference'
+            )}
+            onClick={openReviewLinks}
+          >
+            <ReviewShare />
+          </div>
+        )}{' '}
         {((post.integration.providerIdentifier === 'x' && disableXAnalytics) || !post.releaseId) ? (
           <></>
         ) : post.releaseId === 'missing' && missingRelease ? (
@@ -1362,36 +1414,40 @@ const CalendarItem: FC<{
         ) : (
           <></>
         )}{' '}
-        <div
-          className={clsx(
-            'hidden group-hover:block hover:underline cursor-pointer',
-            post?.tags?.[0]?.tag?.color && 'text-shadow-tags'
-          )}
-          onClick={preview}
-        >
-          <Preview />
-        </div>
-        <div
-          className={clsx(
-            'hidden group-hover:block hover:underline cursor-pointer',
-            post?.tags?.[0]?.tag?.color && 'text-shadow-tags'
-          )}
-          onClick={duplicatePost}
-        >
-          <Duplicate />
-        </div>
-        <div
-          className={clsx(
-            'hidden group-hover:block hover:underline cursor-pointer text-red-500',
-            post?.tags?.[0]?.tag?.color && 'text-shadow-tags'
-          )}
-          onClick={deletePost}
-        >
-          <DeletePost />
-        </div>
+        {canWrite && (
+          <div
+            className={clsx(
+              'hidden group-hover:block hover:underline cursor-pointer',
+              post?.tags?.[0]?.tag?.color && 'mix-blend-difference'
+            )}
+            onClick={deletePost}
+          >
+            <DeletePost />
+          </div>
+        )}
       </div>
+      {reviewStatus && (
+        <div
+          className="absolute -top-[6px] -right-[6px] z-20 w-[16px] h-[16px] rounded-full flex items-center justify-center text-white text-[10px] cursor-pointer"
+          style={{
+            backgroundColor: reviewStatus === 'APPROVAL' ? '#22c55e' : '#f59e0b',
+          }}
+          data-tooltip-id="tooltip"
+          data-tooltip-content={
+            reviewStatus === 'APPROVAL'
+              ? t('review_approved', 'Aprovado')
+              : t('review_changes_requested', 'Alterações solicitadas')
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            preview();
+          }}
+        >
+          {reviewStatus === 'APPROVAL' ? '✓' : '!'}
+        </div>
+      )}
       <div
-        onClick={editPost}
+        onClick={canWrite ? editPost : preview}
         className={clsx(
           'gap-[5px] w-full flex h-full flex-1 rounded-br-[10px] rounded-bl-[10px] p-[8px] text-[14px] bg-newColColor',
           'relative',
@@ -1407,7 +1463,7 @@ const CalendarItem: FC<{
           />
           <img
             className="w-[12px] h-[12px] rounded-[8px] absolute z-10 top-[10px] end-0 border border-fifth"
-            src={`/icons/platforms/${post.integration?.providerIdentifier}.png`}
+            src={getPlatformIconPath(post.integration?.providerIdentifier || '')}
           />
         </div>
         <div
@@ -1522,6 +1578,28 @@ const Duplicate = () => {
         d="M27 5H9C8.46957 5 7.96086 5.21071 7.58579 5.58579C7.21071 5.96086 7 6.46957 7 7V9H5C4.46957 9 3.96086 9.21071 3.58579 9.58579C3.21071 9.96086 3 10.4696 3 11V25C3 25.5304 3.21071 26.0391 3.58579 26.4142C3.96086 26.7893 4.46957 27 5 27H23C23.5304 27 24.0391 26.7893 24.4142 26.4142C24.7893 26.0391 25 25.5304 25 25V23H27C27.5304 23 28.0391 22.7893 28.4142 22.4142C28.7893 22.0391 29 21.5304 29 21V7C29 6.46957 28.7893 5.96086 28.4142 5.58579C28.0391 5.21071 27.5304 5 27 5ZM23 11V13H5V11H23ZM23 25H5V15H23V25ZM27 21H25V11C25 10.4696 24.7893 9.96086 24.4142 9.58579C24.0391 9.21071 23.5304 9 23 9H9V7H27V21Z"
         fill="currentColor"
       />
+    </svg>
+  );
+};
+const ReviewShare = () => {
+  const t = useT();
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      data-tooltip-id="tooltip"
+      data-tooltip-content={t('share_for_review', 'Share for review')}
+    >
+      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+      <polyline points="16 6 12 2 8 6" />
+      <line x1="12" y1="2" x2="12" y2="15" />
     </svg>
   );
 };

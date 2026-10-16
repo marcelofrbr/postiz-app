@@ -10,6 +10,8 @@ import { MediaActivity } from '@gitroom/orchestrator/activities/media.activity';
 import { ClippingActivity } from '@gitroom/orchestrator/activities/clipping.activity';
 import { VideoModule } from '@gitroom/nestjs-libraries/videos/video.module';
 import { HealthController } from '@gitroom/orchestrator/health.controller';
+import { FlowActivity } from '@gitroom/orchestrator/activities/flow.activity';
+import { RepostActivity } from '@gitroom/orchestrator/activities/repost.activity';
 
 const activities = [
   PostActivity,
@@ -19,6 +21,8 @@ const activities = [
   VideoActivity,
   MediaActivity,
   ClippingActivity,
+  FlowActivity,
+  RepostActivity,
 ];
 @Module({
   imports: [

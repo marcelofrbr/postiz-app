@@ -17,19 +17,18 @@ import { FacebookPreview } from '@gitroom/frontend/components/new-launch/provide
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { useEffect } from 'react';
 
-const postType = [
-  {
-    value: 'post',
-    label: 'Post',
-  },
-  {
-    value: 'story',
-    label: 'Story',
-  },
-];
-
 export const FacebookSettings = () => {
   const t = useT();
+  const postType = [
+    {
+      value: 'post',
+      label: t('post_type_option_post_reel', 'Post / Reel'),
+    },
+    {
+      value: 'story',
+      label: t('post_type_option_story', 'Story'),
+    },
+  ];
   const { register, watch, setValue } = useSettings();
   const { value } = useIntegration();
   const postCurrentType = watch('post_type');
@@ -52,7 +51,7 @@ export const FacebookSettings = () => {
     <>
       <div className="pt-[20px]">
         <Select
-          label="Post Type"
+          label={t('post_type', 'Post Type')}
           {...register('post_type', {
             value: 'post',
           })}
@@ -71,7 +70,10 @@ export const FacebookSettings = () => {
       {postCurrentType !== 'story' && (
         <>
           <Input
-            label={'Embedded URL (only for text Post)'}
+            label={t(
+              'facebook_embedded_url',
+              'Embedded URL (only for text Post)'
+            )}
             {...register('url')}
           />
           <Input
@@ -129,5 +131,6 @@ export default withProvider<FacebookDto>({
   SettingsComponent: FacebookSettings,
   CustomPreviewComponent: FacebookPreview,
   dto: FacebookDto,
+  defaults: { post_type: 'post' },
   maximumCharacters: 63206,
 });

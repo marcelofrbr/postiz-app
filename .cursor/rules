@@ -1,0 +1,20 @@
+# Robô MultiPost — Cursor Rules
+
+Single source of truth: **`CLAUDE.md`** at the repo root, with per-area
+children (`apps/backend`, `apps/frontend`, `apps/orchestrator`,
+`libraries/nestjs-libraries` and its children `ai/`, `chat/`,
+`integrations/social/`, `libraries/react-shared-libraries`).
+
+Before doing any work in this repo, read:
+
+1. The root `CLAUDE.md` — non-negotiable principles and monorepo map.
+2. The closest `CLAUDE.md` to the directory you are editing (cascade).
+3. `docs/` for detailed architecture referenced by the CLAUDE.md files.
+
+PRs that do not adhere to the principles in `CLAUDE.md` (mandatory TDD,
+Controller→Service→Repository, PNPM only, mandatory `useT()`, etc.) are
+not merged.
+
+`AGENTS.md` at the root points to `CLAUDE.md` as single source of truth.
+
+All `CLAUDE.md` files are in English. CHANGELOG and product docs are in pt-BR.

@@ -20,18 +20,27 @@ import { useT } from '@gitroom/react/translation/get.transation.service.client';
 
 const roles = [
   {
+    key: 'user',
     name: 'User',
     value: 'USER',
   },
   {
+    key: 'admin',
     name: 'Admin',
     value: 'ADMIN',
   },
+];
+const profileRoles = [
+  { key: 'profile_role_owner', name: 'Owner', value: 'OWNER' },
+  { key: 'profile_role_editor', name: 'Editor', value: 'EDITOR' },
+  { key: 'profile_role_manager', name: 'Manager', value: 'MANAGER' },
+  { key: 'profile_role_viewer', name: 'Viewer', value: 'VIEWER' },
 ];
 export const AddMember = () => {
   const modals = useModals();
   const fetch = useFetch();
   const toast = useToaster();
+  const t = useT();
   const resolver = useMemo(() => {
     return classValidatorResolver(AddTeamMemberDto);
   }, []);
@@ -40,6 +49,8 @@ export const AddMember = () => {
       email: '',
       role: '',
       sendEmail: true,
+      profileIds: [] as string[],
+      profileRole: 'EDITOR',
     },
     resolver,
     mode: 'onChange',
@@ -48,8 +59,47 @@ export const AddMember = () => {
     control: form.control,
     name: 'sendEmail',
   });
+  const role = useWatch({
+    control: form.control,
+    name: 'role',
+  });
+  const profileIds = useWatch({
+    control: form.control,
+    name: 'profileIds',
+  });
+  const loadProfiles = useCallback(async () => {
+    return (await fetch('/profiles')).json();
+  }, []);
+  const { data: profiles } = useSWR(
+    role === 'USER' ? 'invite-profiles' : null,
+    loadProfiles,
+    {
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      revalidateIfStale: false,
+    }
+  );
+  const toggleProfile = useCallback(
+    (id: string) => () => {
+      const current = form.getValues('profileIds') || [];
+      form.setValue(
+        'profileIds',
+        current.includes(id)
+          ? current.filter((p: string) => p !== id)
+          : [...current, id],
+        { shouldValidate: true }
+      );
+    },
+    []
+  );
   const submit = useCallback(
-    async (values: { email: string; role: string; sendEmail: boolean }) => {
+    async (values: {
+      email: string;
+      role: string;
+      sendEmail: boolean;
+      profileIds: string[];
+      profileRole: string;
+    }) => {
       const response = await fetch('/settings/team', {
         method: 'POST',
         body: JSON.stringify(values),
@@ -76,27 +126,81 @@ export const AddMember = () => {
     []
   );
 
-  const t = useT();
-
   return (
     <FormProvider {...form}>
       <form onSubmit={form.handleSubmit(submit)}>
         <div className="relative flex gap-[10px] flex-col flex-1 p-[16px] pt-0">
           {sendEmail && (
             <Input
-              label="Email"
+              label={t('label_email', 'Email')}
               placeholder={t('enter_email', 'Enter email')}
               name="email"
             />
           )}
-          <Select label="Role" name="role">
+          <Select label={t('label_role', 'Role')} name="role">
             <option value="">{t('select_role', 'Select Role')}</option>
             {roles.map((role) => (
               <option key={role.value} value={role.value}>
-                {role.name}
+                {t(role.key, role.name)}
               </option>
             ))}
           </Select>
+          <div className="text-[12px] text-customColor18 -mt-[4px]">
+            {t(
+              'invite_role_help',
+              'Papel na organização inteira. Administrador gerencia tudo; Usuário fica restrito aos perfis abaixo.'
+            )}
+          </div>
+          {role === 'USER' && (
+            <>
+              <div className="flex flex-col gap-[6px]">
+                <div className="text-[14px]">
+                  {t('invite_profiles_label', 'Member profiles')}
+                </div>
+                <div className="flex flex-col gap-[4px] max-h-[160px] overflow-y-auto border border-fifth rounded-[4px] p-[8px]">
+                  {(profiles || []).map(
+                    (profile: { id: string; name: string }) => (
+                      <label
+                        key={profile.id}
+                        className="flex items-center gap-[8px] cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={(profileIds || []).includes(profile.id)}
+                          onChange={toggleProfile(profile.id)}
+                        />
+                        <span>{profile.name}</span>
+                      </label>
+                    )
+                  )}
+                </div>
+                {!(profileIds || []).length && (
+                  <div className="text-[12px] text-red-400">
+                    {t(
+                      'invite_profiles_required',
+                      'Select at least one profile'
+                    )}
+                  </div>
+                )}
+              </div>
+              <Select
+                label={t('invite_profile_role_label', 'Role in profiles')}
+                name="profileRole"
+              >
+                {profileRoles.map((profileRole) => (
+                  <option key={profileRole.value} value={profileRole.value}>
+                    {t(profileRole.key, profileRole.name)}
+                  </option>
+                ))}
+              </Select>
+              <div className="text-[12px] text-customColor18 -mt-[4px]">
+                {t(
+                  'invite_profile_role_help',
+                  'O que o membro pode fazer dentro dos perfis selecionados. Visualizador só lê; Editor cria e edita; Gerente também gerencia o perfil.'
+                )}
+              </div>
+            </>
+          )}
           <div className="flex gap-[5px]">
             <div>
               <Checkbox name="sendEmail" />
@@ -131,9 +235,25 @@ export const TeamsComponent = () => {
       user: {
         email: string;
         id: string;
+        profileMembers?: Array<{
+          role: 'OWNER' | 'MANAGER' | 'EDITOR' | 'VIEWER';
+          profile: { id: string; name: string };
+        }>;
       };
     }>;
   }, []);
+  const profileRoleLabel = useCallback(
+    (role: string) => {
+      const map: Record<string, string> = {
+        OWNER: t('profile_role_owner', 'Proprietário'),
+        MANAGER: t('profile_role_manager', 'Gerente'),
+        EDITOR: t('profile_role_editor', 'Editor'),
+        VIEWER: t('profile_role_viewer', 'Visualizador'),
+      };
+      return map[role] ?? role;
+    },
+    [t]
+  );
   const addMember = useCallback(() => {
     modals.openModal({
       classNames: {
@@ -193,6 +313,17 @@ export const TeamsComponent = () => {
                   : p.role === 'ADMIN'
                   ? t('admin', 'Admin')
                   : t('super_admin', 'Super Admin')}
+              </div>
+              <div className="flex-1 text-[12px] text-customColor18">
+                {p.role === 'ADMIN' || p.role === 'SUPERADMIN'
+                  ? t('all_profiles', 'Todos os perfis')
+                  : (p.user.profileMembers || []).length
+                  ? (p.user.profileMembers || [])
+                      .map(
+                        (pm) => `${pm.profile.name} (${profileRoleLabel(pm.role)})`
+                      )
+                      .join(', ')
+                  : t('no_profile_assigned_short', 'Sem perfil')}
               </div>
               {+myLevel > +getLevel(p.role) ? (
                 <div className="flex-1 flex justify-end">

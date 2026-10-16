@@ -1,6 +1,7 @@
 import {
   S3Client,
   PutObjectCommand,
+  HeadBucketCommand,
   GetObjectCommand,
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
@@ -17,8 +18,10 @@ import axios from 'axios';
 import { isSafePublicHttpsUrl } from '@gitroom/nestjs-libraries/dtos/webhooks/webhook.url.validator';
 import { ssrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { parseDataUrl } from '@gitroom/nestjs-libraries/upload/data.url';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { fileTypeFromBuffer } = require('file-type');
+// file-type is ESM-only, so it is loaded on first use instead of at import time
+const fileTypeFromBuffer = (buffer: Buffer): Promise<any> =>
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  require('file-type').fileTypeFromBuffer(buffer);
 
 const ALLOWED_MIME_TYPES = new Set<string>([
   'image/jpeg',
@@ -82,6 +85,13 @@ class CloudflareStorage implements IUploadProvider {
           return next(args);
         },
       { step: 'build', name: 'customHeaders' }
+    );
+  }
+
+  async healthCheck(): Promise<void> {
+    // HeadBucket valida credencial R2 + acesso ao bucket SEM escrever nada.
+    await this._client.send(
+      new HeadBucketCommand({ Bucket: this._bucketName })
     );
   }
 
@@ -243,17 +253,53 @@ class CloudflareStorage implements IUploadProvider {
     );
   }
 
-  // Accepts either the public URL or the bare key
-  async removeFile(filePath: string): Promise<void> {
-    const fileName = filePath.split('/').pop();
-    if (!fileName) {
+  /**
+   * Deriva a Key do objeto no bucket a partir da URL publica gravada em
+   * `Media.path`/`Media.thumbnail`. Exige o prefixo `CLOUDFLARE_BUCKET_URL`:
+   * uma URL de terceiro (import externo, CDN de rede social) nao pertence ao
+   * nosso bucket e nao pode virar `DeleteObject`, deletariamos por engano um
+   * objeto homonimo. Retorna '' quando a URL nao e nossa.
+   */
+  private resolveObjectKey(publicPath: string): string {
+    if (!publicPath || !this._uploadUrl) {
+      return '';
+    }
+
+    const clean = publicPath.split('?')[0].split('#')[0];
+    const prefix = this._uploadUrl.endsWith('/')
+      ? this._uploadUrl
+      : `${this._uploadUrl}/`;
+
+    // A bare key (no scheme, no slash) is how the media processor and the
+    // clipping flow refer to objects of this bucket
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(clean) && !clean.includes('/')) {
+      return clean;
+    }
+
+    if (!clean.startsWith(prefix)) {
+      return '';
+    }
+
+    try {
+      return decodeURIComponent(clean.slice(prefix.length));
+    } catch {
+      return clean.slice(prefix.length);
+    }
+  }
+
+  // Implement the removeFile method from IUploadProvider
+  async removeFile(publicPath: string): Promise<void> {
+    const key = this.resolveObjectKey(publicPath);
+    if (!key) {
       return;
     }
 
+    // DeleteObject no R2/S3 e idempotente: apagar chave inexistente devolve
+    // 204, entao nao ha caso de "not found" para tratar aqui.
     await this._client.send(
       new DeleteObjectCommand({
         Bucket: this._bucketName,
-        Key: fileName,
+        Key: key,
       })
     );
   }

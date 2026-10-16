@@ -2,6 +2,7 @@
 
 import { FC, ReactNode } from 'react';
 import { useUser } from '@gitroom/frontend/components/layout/user.context';
+import { useProfilePermissions } from '@gitroom/frontend/hooks/use-profile-permissions';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { MenuItem } from '@gitroom/frontend/components/new-layout/menu-item';
@@ -101,6 +102,27 @@ export const useMenuItem = () => {
         </svg>
       ),
       path: '/media',
+    },
+    {
+      name: t('automacoes', 'Automations'),
+      icon: (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <path
+            d="M13 2L3 14H12L11 22L21 10H12L13 2Z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ),
+      path: '/automacoes',
     },
   ] satisfies MenuItemInterface[] as MenuItemInterface[];
 
@@ -226,6 +248,7 @@ export const useMenuItem = () => {
 
 export const TopMenu: FC = () => {
   const user = useUser();
+  const { isViewer } = useProfilePermissions();
   const { firstMenu, secondMenu } = useMenuItem();
   const { isGeneral, billingEnabled } = useVariables();
   return (
@@ -245,6 +268,11 @@ export const TopMenu: FC = () => {
                   return false;
                 }
                 if (f.name === 'Billing' && user?.isLifetime) {
+                  return false;
+                }
+                // Visualizador (cliente convidado por agencia) so acessa o
+                // Calendario para acompanhar; nada de midia/agente/automacoes.
+                if (isViewer && f.path !== '/launches') {
                   return false;
                 }
                 if (f.role) {
@@ -273,6 +301,11 @@ export const TopMenu: FC = () => {
               return false;
             }
             if (f.name === 'Billing' && user?.isLifetime) {
+              return false;
+            }
+            // Visualizador nao tem nada em Configuracoes (todas as abas exigem
+            // Editor+ ou admin da org) — esconde o item do menu.
+            if (isViewer && f.path === '/settings') {
               return false;
             }
             if (f.role) {

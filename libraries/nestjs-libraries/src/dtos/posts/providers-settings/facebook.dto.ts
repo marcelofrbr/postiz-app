@@ -94,14 +94,17 @@ export const FACEBOOK_PRESETS: FacebookPreset[] = [
 ];
 
 export class FacebookDto {
-  @IsOptional()
-  @ValidateIf(p => p.url)
-  @IsUrl()
-  url?: string;
-
+  // Tipo de publicacao: feed/reel (padrao) ou story.
+  // Opcional para retrocompatibilidade: posts agendados antes desta feature
+  // nao carregam o campo, e o provider trata a ausencia como 'post'.
   @IsIn(['post', 'story'])
   @IsOptional()
   post_type?: 'post' | 'story';
+
+  @IsOptional()
+  @ValidateIf((p) => p.url)
+  @IsUrl()
+  url?: string;
 
   // Optional Facebook background preset for text-only posts. Kept permissive
   // (@IsString rather than @IsIn) so existing posts without the field still

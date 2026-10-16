@@ -14,7 +14,10 @@ export interface IAuthenticator {
     },
     clientInformation?: ClientInformation
   ): Promise<AuthTokenDetails | string>;
-  refreshToken(refreshToken: string): Promise<AuthTokenDetails>;
+  refreshToken(
+    refreshToken: string,
+    clientInformation?: ClientInformation
+  ): Promise<AuthTokenDetails>;
   reConnect?(
     id: string,
     requiredId: string,
@@ -26,13 +29,15 @@ export interface IAuthenticator {
   analytics?(
     id: string,
     accessToken: string,
-    date: number
+    date: number,
+    integration?: Integration
   ): Promise<AnalyticsData[]>;
   postAnalytics?(
     integrationId: string,
     accessToken: string,
     postId: string,
     fromDate: number,
+    integration?: Integration
   ): Promise<AnalyticsData[]>;
   resolveReleaseId?(
     accessToken: string,
@@ -185,6 +190,12 @@ export interface SocialProvider
   stripLinks?: () => boolean;
   refreshCron?: boolean;
   refreshErrorMessage?(err: any): string | undefined;
+  // Provider cujo refreshToken() e stub (sem mecanismo nativo de renovacao,
+  // ex.: facebook/instagram via Facebook Login, cujo Page Access Token nao se
+  // renova por refresh_token). O cron em lote NAO deve tratar o retorno vazio
+  // do stub como falha real e desconectar (falso positivo); a renovacao
+  // acontece via MetaSystemUserService (System User token) ou no post-time.
+  noNativeRefresh?: boolean;
   dto?: any;
   maxLength: (additionalSettings?: any, settings?: any) => number;
   checkValidity(
@@ -225,6 +236,15 @@ export interface SocialProvider
   toolTip?: string;
   oneTimeToken?: boolean;
   isBetweenSteps: boolean;
+  // Quando true, o controller de OAuth usa refreshToken/expiresIn vindos do
+  // authenticate() em vez de body.refresh/default no fluxo de reConnect.
+  // Necessario para providers cujo access token expira em horas (YouTube/GMB),
+  // onde perder o refresh_token real do OAuth quebra a renovacao automatica.
+  keepReconnectAuthTokens?: boolean;
+  // Revoga programaticamente o token antigo antes da reconexao. Forca o
+  // provider a exibir tela de consent e emitir refresh_token novo, mesmo
+  // quando a conta ja autorizou o app antes (Google pula consent silencioso).
+  revokeToken?(accessToken: string): Promise<void>;
   scopes: string[];
   externalUrl?: (
     url: string

@@ -7,6 +7,8 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { IntegrationTimeDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.time.dto';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
+import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.service';
+import { encryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 
 @Injectable()
 export class IntegrationRepository {
@@ -17,8 +19,20 @@ export class IntegrationRepository {
     private _plugs: PrismaRepository<'plugs'>,
     private _exisingPlugData: PrismaRepository<'exisingPlugData'>,
     private _customers: PrismaRepository<'customer'>,
-    private _mentions: PrismaRepository<'mentions'>
+    private _mentions: PrismaRepository<'mentions'>,
+    private _encryption: EncryptionService
   ) {}
+
+  // B1 Etapa 2: criptografia dos tokens de canal em repouso. LIGADA por padrao
+  // (igual as credenciais/chaves de IA, que ja sao cifradas sem config). Sem
+  // variavel obrigatoria. Freio de emergencia OPCIONAL: setar
+  // DISABLE_INTEGRATION_TOKEN_ENCRYPTION=true faz novas escritas voltarem a
+  // texto puro (os ja cifrados seguem sendo lidos pelo prefixo). encrypt e
+  // idempotente (token ja prefixado ou vazio volta inalterado); a leitura
+  // (Etapa 1) decide por prefixo, entao tokens antigos em texto puro funcionam.
+  private get shouldEncryptTokens(): boolean {
+    return process.env.DISABLE_INTEGRATION_TOKEN_ENCRYPTION !== 'true';
+  }
 
   getMentions(platform: string, q: string) {
     return this._mentions.model.mentions.findMany({
@@ -169,7 +183,18 @@ export class IntegrationRepository {
       (params.picture.indexOf(process.env.CLOUDFLARE_BUCKET_URL!) === -1 ||
         params.picture.indexOf(process.env.FRONTEND_URL!) === -1)
     ) {
-      params.picture = await this.storage.uploadSimple(params.picture);
+      try {
+        params.picture = await this.storage.uploadSimple(params.picture);
+      } catch (err) {
+        // Avatar e cosmetico: uma falha de storage (ex.: credencial R2 errada)
+        // NAO pode derrubar a selecao de pagina / conexao do canal. Mantem a
+        // URL original do provider (publica e utilizavel).
+        console.error(
+          `[integration] falha ao subir avatar na selecao de pagina (mantendo original): ${
+            (err as Error)?.name || 'Error'
+          }: ${(err as Error)?.message || 'sem detalhe'}`
+        );
+      }
     }
 
     const existing = await this._integration.model.integration.findUnique({
@@ -202,28 +227,77 @@ export class IntegrationRepository {
       });
     }
 
+    // Só cifra valores realmente presentes (string nao-vazia). null/''/undefined
+    // passam por `...params` inalterados — evita divergencia on/off (cifrar so
+    // faz sentido para um token real; nao marcar tokenEncrypted sem ter cifrado).
+    const encryptedTokenFields = this.shouldEncryptTokens
+      ? {
+          ...(params.token
+            ? { token: encryptIntegrationToken(this._encryption, params.token) }
+            : {}),
+          ...(params.refreshToken
+            ? {
+                refreshToken: encryptIntegrationToken(
+                  this._encryption,
+                  params.refreshToken
+                ),
+              }
+            : {}),
+          ...(params.token || params.refreshToken
+            ? { tokenEncrypted: true }
+            : {}),
+        }
+      : {};
+
     return this._integration.model.integration.update({
       where: {
         ...(existing ? { id: existing.id } : { id }),
       },
       data: {
         ...params,
+        ...encryptedTokenFields,
         disabled: false,
         deletedAt: null,
       },
     });
   }
 
-  disconnectChannel(org: string, id: string) {
+  setIntegrationProfile(id: string, profileId: string) {
     return this._integration.model.integration.update({
+      where: { id },
+      data: { profileId },
+    });
+  }
+
+  /**
+   * Marca refreshNeeded=true de forma ATOMICA, apenas na transicao false->true.
+   * Retorna true quando de fato transicionou agora (para o service notificar uma
+   * unica vez) e false quando o canal ja estava marcado — evitando e-mail/sininho
+   * duplicados quando o batch de refresh e o post-time colidem na mesma
+   * integration (o filtro no `where` faz o guard sem read-then-write).
+   *
+   * `reason` (ja sanitizado — name+message, NUNCA o token) e persistido em
+   * refreshError/refreshErrorAt na MESMA escrita atomica, para a tela de Status
+   * mostrar o "porque" da desconexao.
+   */
+  async markRefreshNeeded(
+    org: string,
+    id: string,
+    reason?: string
+  ): Promise<boolean> {
+    const { count } = await this._integration.model.integration.updateMany({
       where: {
         id,
         organizationId: org,
+        refreshNeeded: false,
       },
       data: {
         refreshNeeded: true,
+        refreshError: reason ?? null,
+        refreshErrorAt: new Date(),
       },
     });
+    return count > 0;
   }
 
   getIntegrationByInternalId(org: string, internalId: string) {
@@ -309,8 +383,17 @@ export class IntegrationRepository {
     isBetweenSteps = false,
     refresh?: string,
     timezone?: number,
-    customInstanceDetails?: string
+    customInstanceDetails?: string,
+    profileId?: string
   ) {
+    const encToken = this.shouldEncryptTokens
+      ? encryptIntegrationToken(this._encryption, token)
+      : token;
+    const encRefreshToken = this.shouldEncryptTokens
+      ? encryptIntegrationToken(this._encryption, refreshToken)
+      : refreshToken;
+    const tokenEncrypted = this.shouldEncryptTokens;
+
     const postTimes = timezone
       ? {
           postingTimes: JSON.stringify([
@@ -331,11 +414,12 @@ export class IntegrationRepository {
         type: type as any,
         name,
         providerIdentifier: provider,
-        token,
+        token: encToken,
         profile: username,
         ...(picture ? { picture } : {}),
         inBetweenSteps: isBetweenSteps,
-        refreshToken,
+        refreshToken: encRefreshToken,
+        tokenEncrypted,
         ...(expiresIn
           ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
           : {}),
@@ -343,8 +427,11 @@ export class IntegrationRepository {
         ...postTimes,
         organizationId: org,
         refreshNeeded: false,
+        refreshError: null,
+        refreshErrorAt: null,
         rootInternalId: internalId,
         ...(customInstanceDetails ? { customInstanceDetails } : {}),
+        ...(profileId ? { profileId } : {}),
         additionalSettings: additionalSettings
           ? JSON.stringify(additionalSettings)
           : '[]',
@@ -363,9 +450,10 @@ export class IntegrationRepository {
         ...(picture ? { picture } : {}),
         profile: username,
         providerIdentifier: provider,
-        token,
+        token: encToken,
         // never wipe a stored refresh token with an empty one
-        ...(refreshToken ? { refreshToken } : {}),
+        ...(refreshToken ? { refreshToken: encRefreshToken } : {}),
+        tokenEncrypted,
         ...(expiresIn
           ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
           : {}),
@@ -373,6 +461,8 @@ export class IntegrationRepository {
         organizationId: org,
         deletedAt: null,
         refreshNeeded: false,
+        refreshError: null,
+        refreshErrorAt: null,
       },
     });
 
@@ -395,9 +485,12 @@ export class IntegrationRepository {
           rootInternalId: rootId,
         },
         data: {
-          token,
-          refreshToken,
+          token: encToken,
+          refreshToken: encRefreshToken,
+          tokenEncrypted,
           refreshNeeded: false,
+          refreshError: null,
+          refreshErrorAt: null,
           ...(expiresIn
             ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
             : {}),
@@ -417,6 +510,7 @@ export class IntegrationRepository {
         inBetweenSteps: false,
         deletedAt: null,
         refreshNeeded: false,
+        OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }],
       },
     });
   }
@@ -455,11 +549,46 @@ export class IntegrationRepository {
     });
   }
 
-  getIntegrationById(org: string, id: string) {
+  getIntegrationById(org: string, id: string, profileId?: string) {
     return this._integration.model.integration.findFirst({
       where: {
         organizationId: org,
         id,
+        deletedAt: null,
+        AND: [
+          { OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }] },
+          ...(profileId ? [{ OR: [{ profileId }, { profileId: null }] }] : []),
+        ],
+      },
+    });
+  }
+
+  getIntegrationsByInternalId(internalId: string) {
+    return this._integration.model.integration.findMany({
+      where: {
+        internalId,
+        deletedAt: null,
+        disabled: false,
+        OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }],
+      },
+    });
+  }
+
+  // Usado em saveProviderPage para detectar quando o user esta tentando
+  // conectar um canal que ja existe em outro perfil da mesma org.
+  // Retorna a integracao ativa (nao soft-deleted) com profile incluido.
+  findActiveByOrgAndInternalIdWithProfile(org: string, internalId: string) {
+    return this._integration.model.integration.findFirst({
+      where: {
+        organizationId: org,
+        internalId,
+        deletedAt: null,
+        OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }],
+      },
+      include: {
+        clientProfile: {
+          select: { id: true, name: true },
+        },
       },
     });
   }
@@ -586,11 +715,15 @@ export class IntegrationRepository {
     });
   }
 
-  getIntegrationsList(org: string) {
+  getIntegrationsList(org: string, profileId?: string) {
     return this._integration.model.integration.findMany({
       where: {
         organizationId: org,
         deletedAt: null,
+        AND: [
+          { OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }] },
+          ...(profileId ? [{ OR: [{ profileId }, { profileId: null }] }] : []),
+        ],
       },
       include: {
         customer: true,
@@ -635,6 +768,40 @@ export class IntegrationRepository {
         updatedAt: true,
         releaseURL: true,
         error: true,
+      },
+    });
+  }
+
+  /**
+   * Canais que precisam de atencao para a tela de Status: token morto
+   * (refreshNeeded) OU desativado (disabled). Escopado por org; `profileId`
+   * opcional para drill-down futuro. `select` EXPLICITO — nunca retorna
+   * token/refreshToken. Traz o perfil de origem embutido (sem N+1). Indices em
+   * refreshNeeded/disabled ja existem.
+   */
+  getProblemChannels(org: string, profileId?: string) {
+    return this._integration.model.integration.findMany({
+      where: {
+        organizationId: org,
+        deletedAt: null,
+        OR: [{ refreshNeeded: true }, { disabled: true }],
+        AND: [
+          { OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }] },
+        ],
+        ...(profileId ? { profileId } : {}),
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        providerIdentifier: true,
+        internalId: true,
+        picture: true,
+        refreshNeeded: true,
+        disabled: true,
+        refreshError: true,
+        refreshErrorAt: true,
+        clientProfile: { select: { id: true, name: true } },
       },
     });
   }
@@ -848,9 +1015,10 @@ export class IntegrationRepository {
       where: {
         organizationId: org,
         internalId: page,
-        deletedAt: {
-          not: null,
-        },
+        OR: [
+          { deletedAt: { not: null } },
+          { clientProfile: { deletedAt: { not: null } } },
+        ],
       },
       data: {
         internalId: makeId(10),
@@ -864,6 +1032,7 @@ export class IntegrationRepository {
         organizationId: org,
         disabled: false,
         deletedAt: null,
+        OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }],
       },
       take: totalChannels,
       select: {
@@ -979,6 +1148,7 @@ export class IntegrationRepository {
         organizationId: orgId,
         disabled: false,
         deletedAt: null,
+        OR: [{ profileId: null }, { clientProfile: { deletedAt: null } }],
       },
       select: {
         postingTimes: true,

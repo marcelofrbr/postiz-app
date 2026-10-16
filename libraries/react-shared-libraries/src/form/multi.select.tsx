@@ -66,26 +66,28 @@ export const MultiSelect: FC<{
       </div>
       <div
         className={clsx(
-          'bg-newBgColorInner border border-newTableBorder rounded-[8px] max-h-[160px] overflow-auto p-[12px] flex flex-col gap-[8px]',
+          'flex max-h-[160px] flex-col gap-[8px] overflow-auto rounded-[8px] border border-newTableBorder bg-newBgColorInner p-[12px]',
           className
         )}
       >
         {options.map((option) => (
           <label
+            className="flex cursor-pointer items-center gap-[8px] text-[14px]"
             key={option.value}
-            className="flex items-center gap-[8px] cursor-pointer text-[14px]"
           >
             <input
-              type="checkbox"
               checked={isSelected(option.value)}
+              name={name}
               onChange={() => toggle(option.value)}
+              type="checkbox"
+              value={option.value}
             />
             <span>{option.label}</span>
           </label>
         ))}
       </div>
       {!hideErrors && (
-        <div className="text-red-400 text-[12px]">{err || <>&nbsp;</>}</div>
+        <div className="text-[12px] text-red-400">{err || <>&nbsp;</>}</div>
       )}
     </div>
   );

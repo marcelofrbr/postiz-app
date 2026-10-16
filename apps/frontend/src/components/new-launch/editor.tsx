@@ -1032,6 +1032,12 @@ export const Editor: FC<{
                         text={valueWithoutHtml}
                       />
                     }
+                    editor={editorRef?.current?.editor}
+                    platform={
+                      identifier && identifier !== 'global'
+                        ? identifier
+                        : undefined
+                    }
                     toolBar={
                       <div className="flex gap-[5px] mobile:gap-[4px]">
                         <SignatureBox editor={editorRef?.current?.editor} />

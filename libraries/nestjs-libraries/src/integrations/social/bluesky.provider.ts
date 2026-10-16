@@ -28,6 +28,7 @@ import { isSafePublicHttpsUrl } from '@gitroom/nestjs-libraries/dtos/webhooks/we
 import {
   getSsrfSafeAxios,
   getSsrfSafeDispatcher,
+  ssrfSafeFetch,
 } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import sharp from 'sharp';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
@@ -330,6 +331,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     try {
       const agent = new BskyAgent({
         service: body.service,
+        fetch: ssrfSafeFetch,
       });
 
       const {
@@ -364,6 +366,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     );
     const agent = new BskyAgent({
       service: body.service,
+      fetch: ssrfSafeFetch,
     });
 
     try {
@@ -794,12 +797,22 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
       depth: 0,
     });
 
-    // @ts-ignore
-    const parentCid = parentThread.data.thread.post?.cid;
-    // @ts-ignore
-    const rootUri = parentThread.data.thread.post?.record?.reply?.root?.uri || postId;
-    // @ts-ignore
-    const rootCid = parentThread.data.thread.post?.record?.reply?.root?.cid || parentCid;
+    const thread = parentThread.data.thread;
+    if (!('post' in thread) || !thread.post) {
+      throw new BadBody(
+        this.identifier,
+        JSON.stringify(thread),
+        {} as BodyInit,
+        'Could not find the Bluesky post being replied to'
+      );
+    }
+
+    const parentCid = thread.post.cid;
+    const record = thread.post.record as {
+      reply?: { root?: { uri?: string; cid?: string } };
+    };
+    const rootUri = record.reply?.root?.uri || postId;
+    const rootCid = record.reply?.root?.cid || parentCid;
 
     setHeartbeatDetails('bluesky: create post');
     // @ts-ignore
@@ -859,6 +872,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     );
     const agent = new BskyAgent({
       service: body.service,
+      fetch: ssrfSafeFetch,
     });
 
     await agent.login({
@@ -920,6 +934,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     );
     const agent = new BskyAgent({
       service: body.service,
+      fetch: ssrfSafeFetch,
     });
 
     await agent.login({
@@ -976,6 +991,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
 
     const agent = new BskyAgent({
       service: body.service,
+      fetch: ssrfSafeFetch,
     });
 
     await agent.login({

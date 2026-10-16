@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
   Param,
   Post,
   Query,
@@ -14,7 +15,8 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
-import { Organization } from '@prisma/client';
+import { GetProfileFromRequest } from '@gitroom/nestjs-libraries/user/profile.from.request';
+import { Organization, Profile } from '@prisma/client';
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { ApiTags } from '@nestjs/swagger';
 import handleR2Upload from '@gitroom/nestjs-libraries/upload/r2.uploader';
@@ -23,8 +25,11 @@ import { streamUploadOptions } from '@gitroom/nestjs-libraries/upload/multer.str
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { SaveMediaInformationDto } from '@gitroom/nestjs-libraries/dtos/media/save.media.information.dto';
+import { DeleteMediaDto } from '@gitroom/nestjs-libraries/dtos/media/delete.media.dto';
 import { VideoDto } from '@gitroom/nestjs-libraries/dtos/videos/video.dto';
 import { VideoFunctionDto } from '@gitroom/nestjs-libraries/dtos/videos/video.function.dto';
+import { GenerateImageBodyDto } from '@gitroom/nestjs-libraries/dtos/ai/image.dto';
+import { ImageMode } from '@gitroom/nestjs-libraries/ai/ai-image.service';
 
 @ApiTags('Media')
 @Controller('/media')
@@ -36,8 +41,23 @@ export class MediaController {
   ) {}
 
   @Delete('/:id')
-  deleteMedia(@GetOrgFromRequest() org: Organization, @Param('id') id: string) {
-    return this._mediaService.deleteMedia(org.id, id);
+  deleteMedia(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
+    @Param('id') id: string
+  ) {
+    return this._mediaService.deleteMedia(org.id, id, profile?.id);
+  }
+
+  // Precisa ficar ANTES de `@Post('/:endpoint')` (upload multipart R2), que
+  // casaria com qualquer path de um segmento.
+  @Post('/delete-many')
+  deleteManyMedia(
+    @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
+    @Body() body: DeleteMediaDto
+  ) {
+    return this._mediaService.deleteMediaBulk(org.id, body.ids, profile?.id);
   }
 
   @Post('/generate-video')
@@ -52,42 +72,83 @@ export class MediaController {
   @Post('/generate-image')
   async generateImage(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Req() req: Request,
     @Body('prompt') prompt: string,
-    isPicturePrompt = false
+    isPicturePrompt = false,
+    aspectRatio?: '1:1' | '9:16' | '16:9',
+    extra?: { mode?: ImageMode; referenceImageUrl?: string }
   ) {
     const total = await this._subscriptionService.checkCredits(org);
-    if (process.env.STRIPE_PUBLISHABLE_KEY && total.credits <= 0) {
+    if (total.credits <= 0) {
       return false;
     }
 
     return {
       output:
-        'data:image/png;base64,' +
-        (await this._mediaService.generateImage(prompt, org, isPicturePrompt)),
+        (isPicturePrompt ? '' : 'data:image/png;base64,') +
+        (await this._mediaService.generateImage(
+          prompt,
+          org,
+          isPicturePrompt,
+          profile?.id,
+          aspectRatio,
+          extra
+        )),
     };
   }
 
   @Post('/generate-image-with-prompt')
   async generateImageFromText(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Req() req: Request,
-    @Body('prompt') prompt: string
+    @Body() body: GenerateImageBodyDto
   ) {
-    const image = await this.generateImage(org, req, prompt, true);
+    // skipEnrich=true => o prompt vai cru pro modelo (sem
+    // generatePromptForPicture). Default false: enriquece.
+    const isPicturePrompt = !body.skipEnrich;
+
+    const image = await this.generateImage(
+      org,
+      profile,
+      req,
+      body.prompt,
+      isPicturePrompt,
+      body.aspectRatio,
+      {
+        mode: body.mode,
+        referenceImageUrl: body.referenceImageUrl,
+      }
+    );
     if (!image) {
       return false;
     }
 
-    const file = await this.storage.uploadSimple(image.output);
+    // `generateImage` com `isPicturePrompt=true` retorna `output` como
+    // base64 puro (sem prefix `data:`). `uploadSimple` espera URL ou
+    // data URL, entao montamos o prefix aqui antes de delegar — caso
+    // contrario o helper cai em fetch(base64Puro) e undici joga erro
+    // "Failed to parse URL".
+    const payload = image.output.startsWith('data:')
+      ? image.output
+      : `data:image/png;base64,${image.output}`;
+    const file = await this.storage.uploadSimple(payload);
 
-    return this._mediaService.saveFile(org.id, file.split('/').pop(), file);
+    return this._mediaService.saveFile(
+      org.id,
+      file.split('/').pop(),
+      file,
+      undefined,
+      profile?.id
+    );
   }
 
   @Post('/upload-server')
   @UseInterceptors(FileInterceptor('file', streamUploadOptions()))
   async uploadServer(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @UploadedFile() file: Express.Multer.File
   ) {
     if (!file) {
@@ -97,13 +158,15 @@ export class MediaController {
       org.id,
       file.filename,
       file.path,
-      file.originalname
+      file.originalname,
+      profile?.id
     );
   }
 
   @Post('/save-media')
   async saveMedia(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Req() req: Request,
     @Body('name') name: string,
     @Body('originalName') originalName: string
@@ -111,11 +174,19 @@ export class MediaController {
     if (!name) {
       return false;
     }
+    // `name` vira a chave do objeto no bucket. O uploader sempre manda um nome
+    // plano (`item.url.split('/').pop()`); aceitar barra ou `..` permitiria
+    // registrar uma mídia apontando para um objeto arbitrário do bucket — que
+    // a exclusão da biblioteca passaria a apagar de verdade.
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+      throw new HttpException('Invalid media name', 400);
+    }
     return this._mediaService.saveFile(
       org.id,
       name,
       process.env.CLOUDFLARE_BUCKET_URL + '/' + name,
-      originalName || undefined
+      originalName || undefined,
+      profile?.id
     );
   }
 
@@ -131,6 +202,7 @@ export class MediaController {
   @UseInterceptors(FileInterceptor('file', streamUploadOptions()))
   async uploadSimple(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @UploadedFile('file') file: Express.Multer.File,
     @Body('preventSave') preventSave: string = 'false'
   ) {
@@ -146,13 +218,15 @@ export class MediaController {
       org.id,
       file.filename,
       file.path,
-      file.originalname
+      file.originalname,
+      profile?.id
     );
   }
 
   @Post('/:endpoint')
   async uploadFile(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Req() req: Request,
     @Res() res: Response,
     @Param('endpoint') endpoint: string
@@ -172,7 +246,8 @@ export class MediaController {
       name,
       // @ts-ignore
       upload.Location,
-      originalName || undefined
+      originalName || undefined,
+      profile?.id
     );
 
     res.status(200).json({ ...upload, saved: saveFile });
@@ -189,10 +264,11 @@ export class MediaController {
   @Get('/')
   getMedia(
     @GetOrgFromRequest() org: Organization,
+    @GetProfileFromRequest() profile: Profile | null,
     @Query('page') page: number,
     @Query('search') search?: string
   ) {
-    return this._mediaService.getMedia(org.id, page, search);
+    return this._mediaService.getMedia(org.id, page, profile?.id, search);
   }
 
   @Get('/video-options')
