@@ -1532,7 +1532,7 @@ export class PostsService {
       throw new BadRequestException('Post does not belong to this profile');
     }
 
-    if (action === 'schedule' && !republish) {
+    if (action === 'schedule' && republish !== true) {
       this.guardAgainstRepublish(getPostById, 'changeDate');
     }
 

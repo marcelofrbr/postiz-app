@@ -209,7 +209,7 @@ describe('PinterestProvider publicacao de video', () => {
     const fetchMock = mockPinterestApi('succeeded');
 
     await expect(
-      provider.post('user-1', 'access-token', [videoPost])
+      provider.post('user-1', 'access-token', [videoPost], {} as any)
     ).resolves.toEqual([
       expect.objectContaining({ postId: 'pin-1', status: 'success' }),
     ]);
@@ -237,7 +237,7 @@ describe('PinterestProvider publicacao de video', () => {
       .mockRejectedValue(new Error('polling continuou depois da falha'));
 
     await expect(
-      provider.post('user-1', 'access-token', [videoPost])
+      provider.post('user-1', 'access-token', [videoPost], {} as any)
     ).rejects.toThrow('The file is corrupted and cannot be uploaded');
     expect(axiosClient.post).toHaveBeenCalledTimes(1);
   });
@@ -253,7 +253,7 @@ describe('PinterestProvider publicacao de video', () => {
     });
 
     await expect(
-      provider.post('user-1', 'access-token', [videoPost])
+      provider.post('user-1', 'access-token', [videoPost], {} as any)
     ).rejects.toThrow('The file took too long to process, please try again');
   });
 });

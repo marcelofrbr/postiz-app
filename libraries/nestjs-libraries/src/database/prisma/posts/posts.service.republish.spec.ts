@@ -58,7 +58,7 @@ const buildService = () => {
   const integrationService = createMock<IntegrationService>();
   const service = new PostsService(
     repository,
-    null as any,
+    { getSocialIntegration: () => ({}) } as any,
     integrationService,
     null as any,
     null as any,
@@ -76,6 +76,7 @@ const buildService = () => {
     posts: [{ id: 'post-1', state: 'QUEUE' }],
   } as any);
   repository.changeDate.mockResolvedValue({ id: 'post-1' } as any);
+  repository.getAnchoredCommentsForPost.mockResolvedValue([] as any);
 
   return { service, repository };
 };
@@ -85,7 +86,7 @@ describe('PostsService - republicacao explicita', () => {
     const { service, repository } = buildService();
 
     const result = expect(
-      service.createPost('org-1', makeBody() as any, 'profile-1')
+      service.createPost('org-1', makeBody() as any, 'WEB', false, 'profile-1')
     ).rejects;
     await result.toBeInstanceOf(BadRequestException);
     await result.toThrow("use type 'update'");
@@ -111,7 +112,7 @@ describe('PostsService - republicacao explicita', () => {
     ];
 
     await expect(
-      service.createPost('org-1', body, 'profile-1')
+      service.createPost('org-1', body, 'WEB', false, 'profile-1')
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(repository.getPostById).toHaveBeenCalledWith('post-2', 'org-1');
@@ -125,6 +126,8 @@ describe('PostsService - republicacao explicita', () => {
       service.createPost(
         'org-1',
         makeBody({ republish: 'true' }) as any,
+        'WEB',
+        false,
         'profile-1'
       )
     ).rejects.toBeInstanceOf(BadRequestException);
@@ -138,6 +141,8 @@ describe('PostsService - republicacao explicita', () => {
     await service.createPost(
       'org-1',
       makeBody({ republish: true }) as any,
+      'WEB',
+      false,
       'profile-1'
     );
 
@@ -156,6 +161,8 @@ describe('PostsService - republicacao explicita', () => {
       service.createPost(
         'org-1',
         makeBody({ republish: true }) as any,
+        'WEB',
+        false,
         'profile-1'
       )
     ).rejects.toThrow('Post does not belong to this profile');
@@ -176,6 +183,8 @@ describe('PostsService - republicacao explicita', () => {
       service.createPost(
         'org-1',
         makeBody({ type: 'update' }) as any,
+        'WEB',
+        false,
         'profile-1'
       )
     ).rejects.toThrow('Post not found');
@@ -189,7 +198,7 @@ describe('PostsService - republicacao explicita', () => {
     // post com esse id. Nao existe em lugar nenhum, entao nao e sequestro.
     repository.getPostById.mockResolvedValue(null);
 
-    await service.createPost('org-1', makeBody() as any, 'profile-1');
+    await service.createPost('org-1', makeBody() as any, 'WEB', false, 'profile-1');
 
     expect(repository.createOrUpdatePost).toHaveBeenCalledTimes(1);
   });
@@ -201,7 +210,7 @@ describe('PostsService - republicacao explicita', () => {
       state: 'QUEUE',
     } as any);
 
-    await service.createPost('org-1', makeBody() as any, 'profile-1');
+    await service.createPost('org-1', makeBody() as any, 'WEB', false, 'profile-1');
 
     expect(repository.createOrUpdatePost).toHaveBeenCalledTimes(1);
   });
@@ -212,6 +221,8 @@ describe('PostsService - republicacao explicita', () => {
     await service.createPost(
       'org-1',
       makeBody({ type: 'update' }) as any,
+      'WEB',
+      false,
       'profile-1'
     );
 
@@ -227,6 +238,7 @@ describe('PostsService - republicacao explicita', () => {
       'post-1',
       '2026-09-04T17:00:00.000Z',
       undefined,
+      false,
       'profile-1'
     );
 
@@ -249,6 +261,7 @@ describe('PostsService - republicacao explicita', () => {
         'post-1',
         '2026-09-04T17:00:00.000Z',
         'schedule',
+        false,
         'profile-1'
       )
     ).rejects.toBeInstanceOf(BadRequestException);
@@ -265,8 +278,8 @@ describe('PostsService - republicacao explicita', () => {
       'post-1',
       '2026-09-04T17:00:00.000Z',
       'schedule',
-      'profile-1',
-      true
+      true,
+      'profile-1'
     );
 
     expect(repository.changeDate).toHaveBeenCalledWith(
@@ -291,6 +304,7 @@ describe('PostsService - republicacao explicita', () => {
       'post-1',
       '2026-09-04T17:00:00.000Z',
       'schedule',
+      false,
       'profile-1'
     );
 
@@ -307,8 +321,8 @@ describe('PostsService - republicacao explicita', () => {
         'post-1',
         '2026-09-04T17:00:00.000Z',
         'schedule',
-        'profile-1',
-        'true' as any
+        'true' as any,
+        'profile-1'
       )
     ).rejects.toBeInstanceOf(BadRequestException);
 

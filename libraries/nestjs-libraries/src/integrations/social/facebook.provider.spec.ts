@@ -232,7 +232,8 @@ describe('FacebookProvider', () => {
       const res = await provider.post(
         'page-1',
         'TOK',
-        buildPost({ media: [{ path: 'https://cdn/img.jpg' }] })
+        buildPost({ media: [{ path: 'https://cdn/img.jpg' }] }),
+        {} as any
       );
 
       expect(fetchMock).toHaveBeenCalledWith(
@@ -259,7 +260,8 @@ describe('FacebookProvider', () => {
       const res = await provider.post(
         'page-1',
         'TOK',
-        buildPost({ media: [{ path: 'https://cdn/v.mp4' }] })
+        buildPost({ media: [{ path: 'https://cdn/v.mp4' }] }),
+        {} as any
       );
 
       expect(fetchMock).toHaveBeenCalledWith(
@@ -287,7 +289,8 @@ describe('FacebookProvider', () => {
         buildPost({
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/img.jpg' }],
-        })
+        }),
+        {} as any
       );
 
       const photosCall = fetchMock.mock.calls.find((c) =>
@@ -334,7 +337,8 @@ describe('FacebookProvider', () => {
         buildPost({
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/v.mp4' }],
-        })
+        }),
+        {} as any
       );
 
       // start
@@ -403,7 +407,8 @@ describe('FacebookProvider', () => {
           buildPost({
             settings: { post_type: 'story' },
             media: [{ path: 'https://cdn/v.mp4' }],
-          })
+          }),
+          {} as any
         )
       ).rejects.toBeDefined();
 
@@ -434,7 +439,8 @@ describe('FacebookProvider', () => {
         buildPost({
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/a.jpg' }, { path: 'https://cdn/b.jpg' }],
-        })
+        }),
+        {} as any
       );
 
       const photoStoriesCalls = fetchMock.mock.calls.filter((c) =>

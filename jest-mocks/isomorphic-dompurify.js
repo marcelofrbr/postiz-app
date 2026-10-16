@@ -8,4 +8,5 @@
 // (via posts.service etc.) so precisam que o modulo carregue — entao
 // devolvemos uma sanitize identidade.
 const sanitize = (value) => (typeof value === 'string' ? value : '');
-module.exports = { sanitize, default: { sanitize } };
+const addHook = () => undefined;
+module.exports = { sanitize, addHook, default: { sanitize, addHook } };

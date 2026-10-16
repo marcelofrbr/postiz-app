@@ -44,7 +44,7 @@ const buildService = (
 ) => {
   const service = new PostsService(
     repo as any,
-    null as any, // integrationManager
+    { getSocialIntegration: () => ({}) } as any, // integrationManager
     integrationService as any,
     null as any, // mediaService
     null as any, // shortLinkService
@@ -79,20 +79,20 @@ describe('PostsService.createPost - derivacao de profileId', () => {
     } as any);
     const service = buildService(repo, integrationService);
 
-    await service.createPost('org-1', makeBody() as any);
+    await service.createPost('org-1', makeBody() as any, 'WEB');
 
     expect(integrationService.getIntegrationById).toHaveBeenCalledWith('org-1', 'int-1');
-    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][6];
+    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][9];
     expect(passedProfileId).toBe('profile-do-canal');
   });
 
   it('usa o profileId explicito sem consultar o canal', async () => {
     const service = buildService(repo, integrationService);
 
-    await service.createPost('org-1', makeBody() as any, 'profile-explicito');
+    await service.createPost('org-1', makeBody() as any, 'WEB', false, 'profile-explicito');
 
     expect(integrationService.getIntegrationById).not.toHaveBeenCalled();
-    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][6];
+    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][9];
     expect(passedProfileId).toBe('profile-explicito');
   });
 
@@ -103,9 +103,9 @@ describe('PostsService.createPost - derivacao de profileId', () => {
     } as any);
     const service = buildService(repo, integrationService);
 
-    await service.createPost('org-1', makeBody() as any);
+    await service.createPost('org-1', makeBody() as any, 'WEB');
 
-    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][6];
+    const passedProfileId = repo.createOrUpdatePost.mock.calls[0][9];
     expect(passedProfileId).toBeUndefined();
   });
 });

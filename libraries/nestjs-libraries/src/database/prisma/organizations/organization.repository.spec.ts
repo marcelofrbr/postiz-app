@@ -105,7 +105,7 @@ describe('OrganizationRepository', () => {
 
       await repository.getImpersonateUser('CLIENTE');
 
-      const userFilters = mockUserOrgFindMany.mock.calls[0][0].where.OR[1].user
+      const userFilters = mockUserOrgFindMany.mock.calls[0][0].where.OR[2].user
         .OR;
       expect(userFilters[0].name).toEqual({
         contains: 'CLIENTE',
