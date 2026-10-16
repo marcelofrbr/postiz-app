@@ -143,6 +143,7 @@ describe('SocialAbstract SSRF', () => {
       url: 'https://cdn.example/file',
       method: 'GET',
       responseType: 'arraybuffer',
+      signal: expect.any(AbortSignal),
     });
   });
 

@@ -244,10 +244,15 @@ describe('PinterestProvider publicacao de video', () => {
 
   it('limita o polling para nao ultrapassar o timeout da atividade', async () => {
     mockPinterestApi('processing');
+    // O limite oficial e por tempo (8 min, abaixo do timeout de 10 min da
+    // atividade): cada espera simulada avanca o relogio em 20s.
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
     let waits = 0;
     jest.mocked(timer).mockImplementation(async () => {
       waits += 1;
-      if (waits > 18) {
+      now += 20000;
+      if (waits > 30) {
         throw new Error('polling sem limite');
       }
     });

@@ -1537,6 +1537,9 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
       return result;
     } catch (err) {
+      if (err instanceof RefreshToken) {
+        throw err;
+      }
       console.error('Error fetching Facebook video post analytics:', err);
       return [];
     }

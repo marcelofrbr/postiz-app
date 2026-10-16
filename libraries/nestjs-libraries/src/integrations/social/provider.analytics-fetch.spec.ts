@@ -42,7 +42,7 @@ describe('analytics usa o transporte seguro sem semantica de publicacao', () => 
 
     await expect(provider.analytics('page-1', 'TOKEN', 7)).resolves.toEqual([]);
     await expect(
-      provider.postAnalytics('page-1', 'TOKEN', 'post-1', 7)
+      provider.postAnalytics('page-1', 'TOKEN', 'page-1_post-1', 7)
     ).resolves.toEqual([]);
 
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -51,7 +51,7 @@ describe('analytics usa o transporte seguro sem semantica de publicacao', () => 
       'graph.facebook.com/v25.0/page-1/insights'
     );
     expect(String(safeFetch.mock.calls[1][0])).toContain(
-      'graph.facebook.com/v25.0/post-1/insights'
+      'graph.facebook.com/v25.0/page-1_post-1/insights'
     );
   });
 

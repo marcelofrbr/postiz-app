@@ -10,6 +10,8 @@ const makeRes = (body: any, status = 200) => ({
   text: async () => JSON.stringify(body),
 });
 
+const integration = { internalId: 'page-1' } as any;
+
 const buildPost = (overrides: Partial<any> = {}) =>
   [
     {
@@ -178,11 +180,11 @@ describe('FacebookProvider', () => {
         expect.arrayContaining([
           expect.objectContaining({
             label: 'Page Impressions',
-            data: [expect.objectContaining({ total: '12' })],
+            data: [expect.objectContaining({ total: 12 })],
           }),
           expect.objectContaining({
             label: 'Media views',
-            data: [expect.objectContaining({ total: '10' })],
+            data: [expect.objectContaining({ total: 10 })],
           }),
         ])
       );
@@ -204,12 +206,12 @@ describe('FacebookProvider', () => {
       const result = await provider.postAnalytics(
         'integration-1',
         'TOK',
-        'post-1',
+        'page-1_post-1',
         7
       );
 
       const url = String(fetchMock.mock.calls[0][0]);
-      expect(url).toContain('graph.facebook.com/v25.0/post-1/insights');
+      expect(url).toContain('graph.facebook.com/v25.0/page-1_post-1/insights');
       expect(url).toContain('post_total_media_view_unique');
       expect(url).not.toContain('post_impressions_unique');
       expect(result[0]).toMatchObject({
@@ -277,7 +279,7 @@ describe('FacebookProvider', () => {
     it('deve publicar story de imagem via /photos (unpublished) e /photo_stories', async () => {
       const fetchMock = jest.fn().mockImplementation((url: string) => {
         if (url.includes('/photo_stories'))
-          return makeRes({ success: true, post_id: 999 });
+          return makeRes({ success: true, post_id: '999' });
         if (url.includes('/photos')) return makeRes({ id: 'photo-1' });
         return makeRes({});
       });
@@ -290,7 +292,7 @@ describe('FacebookProvider', () => {
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/img.jpg' }],
         }),
-        {} as any
+        integration
       );
 
       const photosCall = fetchMock.mock.calls.find((c) =>
@@ -303,7 +305,8 @@ describe('FacebookProvider', () => {
         String(c[0]).includes('/page-1/photo_stories')
       );
       expect(storyCall).toBeDefined();
-      expect(String(storyCall![1].body)).toContain('"photo_id":"photo-1"');
+      // fluxo oficial: photo_id vai na query string do publish
+      expect(String(storyCall![0])).toContain('photo_id=photo-1');
 
       expect(res[0].status).toBe('success');
       expect(res[0].postId).toBe('999');
@@ -318,14 +321,13 @@ describe('FacebookProvider', () => {
           if (url.includes('fields=status'))
             return makeRes({ status: { video_status: 'upload_complete' } });
           if (url.includes('/video_stories')) {
-            const body = JSON.parse(options?.body || '{}');
-            if (body.upload_phase === 'start')
+            if (url.includes('upload_phase=start'))
               return makeRes({
                 video_id: 'vid-9',
                 upload_url:
                   'https://rupload.facebook.com/video-upload/v25.0/vid-9',
               });
-            return makeRes({ success: true, post_id: 555 });
+            return makeRes({ success: true, post_id: '555' });
           }
           return makeRes({});
         });
@@ -338,14 +340,14 @@ describe('FacebookProvider', () => {
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/v.mp4' }],
         }),
-        {} as any
+        integration
       );
 
       // start
       const startCall = fetchMock.mock.calls.find(
         (c) =>
           String(c[0]).includes('/video_stories') &&
-          String(c[1]?.body).includes('"upload_phase":"start"')
+          String(c[0]).includes('upload_phase=start')
       );
       expect(startCall).toBeDefined();
 
@@ -366,10 +368,10 @@ describe('FacebookProvider', () => {
       const finishCall = fetchMock.mock.calls.find(
         (c) =>
           String(c[0]).includes('/video_stories') &&
-          String(c[1]?.body).includes('"upload_phase":"finish"')
+          String(c[0]).includes('upload_phase=finish')
       );
       expect(finishCall).toBeDefined();
-      expect(String(finishCall![1].body)).toContain('"video_id":"vid-9"');
+      expect(String(finishCall![0])).toContain('video_id=vid-9');
 
       expect(res[0].status).toBe('success');
       expect(res[0].postId).toBe('555');
@@ -386,8 +388,7 @@ describe('FacebookProvider', () => {
             return makeRes({ status: { video_status: 'error' } });
           }
           if (url.includes('/video_stories')) {
-            const body = JSON.parse(options?.body || '{}');
-            if (body.upload_phase === 'start') {
+            if (url.includes('upload_phase=start')) {
               return makeRes({
                 video_id: 'vid-error',
                 upload_url:
@@ -408,14 +409,14 @@ describe('FacebookProvider', () => {
             settings: { post_type: 'story' },
             media: [{ path: 'https://cdn/v.mp4' }],
           }),
-          {} as any
+          integration
         )
       ).rejects.toBeDefined();
 
       const finishCall = fetchMock.mock.calls.find(
         (call) =>
           String(call[0]).includes('/video_stories') &&
-          String(call[1]?.body).includes('"upload_phase":"finish"')
+          String(call[0]).includes('upload_phase=finish')
       );
       expect(finishCall).toBeUndefined();
     });
@@ -425,7 +426,7 @@ describe('FacebookProvider', () => {
       const fetchMock = jest.fn().mockImplementation((url: string) => {
         if (url.includes('/photo_stories')) {
           storyCount += 1;
-          return makeRes({ success: true, post_id: storyCount });
+          return makeRes({ success: true, post_id: String(storyCount) });
         }
         if (url.includes('/photos'))
           return makeRes({ id: `photo-${storyCount}` });
@@ -440,7 +441,7 @@ describe('FacebookProvider', () => {
           settings: { post_type: 'story' },
           media: [{ path: 'https://cdn/a.jpg' }, { path: 'https://cdn/b.jpg' }],
         }),
-        {} as any
+        integration
       );
 
       const photoStoriesCalls = fetchMock.mock.calls.filter((c) =>

@@ -1258,6 +1258,37 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
     const today = dayjs().format('YYYY-MM-DD');
 
     try {
+      // Rows saved with the publish_id (no public post id yet) keep the
+      // v_pub_url marker: resolve the public video id before querying it.
+      if (postId.indexOf('v_pub_url') > -1) {
+        const { post, publicPostId } = this.parsePublishStatus(
+          await (
+            await this.analyticsFetch(
+              'https://open.tiktokapis.com/v2/post/publish/status/fetch/',
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json; charset=UTF-8',
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                  publish_id: postId,
+                }),
+              }
+            )
+          ).text()
+        );
+
+        const resolvedId =
+          publicPostId || post?.data?.publicaly_available_post_id?.[0];
+
+        if (!resolvedId) {
+          return [];
+        }
+
+        postId = String(resolvedId);
+      }
+
       // Query video details using the video ID
       const response = await this.analyticsFetch(
         'https://open.tiktokapis.com/v2/video/query/?fields=id,like_count,comment_count,share_count,view_count',

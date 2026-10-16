@@ -63,14 +63,13 @@ describe('LinkedinProvider media', () => {
     const convert = jest
       .spyOn(provider as any, 'convertImagesToPdfCarousel')
       .mockResolvedValue(postDetails);
-    jest
-      .spyOn(provider as any, 'processMediaForPosts')
-      .mockResolvedValue({ 'post-1': [] });
-    const createMain = jest
-      .spyOn(provider as any, 'createMainPost')
-      .mockResolvedValue('urn:li:share:1');
+    jest.spyOn(provider as any, 'processMediaForPosts').mockResolvedValue({
+      mediaUploads: { 'post-1': [] },
+      poll: [],
+      graceChecks: 0,
+    });
 
-    await provider.post(
+    const [response] = await provider.postPending(
       'person-1',
       'token',
       postDetails as any,
@@ -79,13 +78,13 @@ describe('LinkedinProvider media', () => {
     );
 
     expect(convert).not.toHaveBeenCalled();
-    expect(createMain).toHaveBeenCalledWith(
-      'person-1',
-      'token',
-      postDetails[0],
-      [],
-      'personal',
-      false
+    expect(response.pendingData).toEqual(
+      expect.objectContaining({
+        authorId: 'person-1',
+        message: 'Teste',
+        isPdf: false,
+        mediaIds: [],
+      })
     );
   });
 
@@ -177,7 +176,10 @@ describe('LinkedinProvider media', () => {
       return { headers: new Headers() } as Response;
     });
 
-    await expect(provider.uploadImage(image)).resolves.toBe('urn:li:image:1');
+    await expect(provider.uploadImage(image)).resolves.toEqual({
+      id: 'urn:li:image:1',
+      grace: true,
+    });
     expect(uploadedBodies).toEqual([image]);
   });
 
@@ -240,7 +242,10 @@ describe('LinkedinProvider media', () => {
 
     await expect(
       provider.uploadVideo('https://media.example/video.mp4')
-    ).resolves.toBe('urn:li:video:1');
+    ).resolves.toEqual({
+      id: 'urn:li:video:1',
+      poll: { urn: 'urn:li:video:1', endpoint: 'videos' },
+    });
     expect(rangedRequests).toEqual([
       `bytes=0-${chunkSize - 1}`,
       `bytes=${chunkSize}-${totalSize - 1}`,
@@ -279,9 +284,10 @@ describe('LinkedinProvider media', () => {
       } as Response;
     });
 
-    await expect(provider.uploadVideo(path)).resolves.toBe(
-      'urn:li:video:local'
-    );
+    await expect(provider.uploadVideo(path)).resolves.toEqual({
+      id: 'urn:li:video:local',
+      poll: { urn: 'urn:li:video:local', endpoint: 'videos' },
+    });
     expect(uploadedBodies.map((body) => body.length)).toEqual([chunkSize, 3]);
     expect(
       uploadedBodies.every((body) => body.every((byte) => byte === 7))
@@ -297,7 +303,7 @@ describe('LinkedinProvider media', () => {
     });
 
     await expect(
-      (provider as any).videoChunk('https://media.example/video.mp4', 0, 9)
-    ).rejects.toThrow('Range');
+      (provider as any).mediaChunk('https://media.example/video.mp4', 0, 9)
+    ).rejects.toThrow('range request');
   });
 });

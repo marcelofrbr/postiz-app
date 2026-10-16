@@ -75,6 +75,7 @@ describe('WordpressProvider authenticate', () => {
       {
         headers: {
           Authorization: expect.stringMatching(/^Basic /),
+          'User-Agent': expect.stringContaining('Postiz'),
         },
       }
     );
@@ -197,7 +198,8 @@ describe('WordpressProvider post settings', () => {
   });
 
   it('lists categories through the SSRF-safe provider fetch', async () => {
-    const fetch = jest.spyOn(provider, 'fetch').mockResolvedValue(
+    // wpGet usa ssrfSafeFetch direto: this.fetch quebra fora de uma activity
+    const fetch = mockSsrfSafeFetch.mockResolvedValue(
       responseWith({
         body: [
           { id: 2, name: 'News', ignored: true },
@@ -213,14 +215,15 @@ describe('WordpressProvider post settings', () => {
     expect(fetch).toHaveBeenCalledWith(
       'https://example.com/wp-json/wp/v2/categories?per_page=100',
       expect.objectContaining({
-        headers: { Authorization: expect.stringMatching(/^Basic /) },
+        headers: expect.objectContaining({
+          Authorization: expect.stringMatching(/^Basic /),
+        }),
       })
     );
   });
 
   it('lists tags and safely converts a non-array response to an empty list', async () => {
-    jest
-      .spyOn(provider, 'fetch')
+    mockSsrfSafeFetch
       .mockResolvedValueOnce(
         responseWith({ body: [{ id: 8, name: 'Launch' }] })
       )
